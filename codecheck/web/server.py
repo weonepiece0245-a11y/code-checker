@@ -78,6 +78,12 @@ def index():
     return PAGE
 
 
+@app.get("/health")
+def health():
+    """给启动程序确认“服务已经起来了”用：不需要令牌，也不包含任何敏感信息。"""
+    return {"app": "codecheck", "version": __version__}
+
+
 @app.get("/api/info")
 def info():
     return {"ai_auto": pick_backend("auto"), "version": __version__}
@@ -281,8 +287,8 @@ def _is_ours(port: int) -> bool:
     import json
     import urllib.request
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/info", timeout=2) as r:
-            return "ai_auto" in json.loads(r.read())
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+            return json.loads(r.read()).get("app") == "codecheck"
     except Exception:
         return False
 

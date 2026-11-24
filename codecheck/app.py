@@ -30,7 +30,7 @@ align-items:center;justify-content:center;font:16px system-ui,'Microsoft YaHei';
 
 def _log_to_file():
     """pythonw 没有控制台，把输出写到 app.log 方便排查问题。"""
-    if sys.stdout is None or sys.stderr is None or "--log" in sys.argv:
+    if True:  # 桌面应用没有可见的控制台，输出一律写进 app.log
         try:
             if LOG.exists() and LOG.stat().st_size > 1_000_000:
                 LOG.unlink()
@@ -44,6 +44,8 @@ def _log_to_file():
 def _free_port(preferred: int = 8765) -> int:
     for port in (preferred, 0):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if sys.platform != "win32":  # 忽略刚关闭连接留下的 TIME_WAIT（Windows 上这样设置反而不安全）
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("127.0.0.1", port))
                 return s.getsockname()[1]
@@ -62,7 +64,8 @@ def _start_server(port: int) -> str:
     url = f"http://127.0.0.1:{port}"
     for _ in range(150):
         try:
-            urllib.request.urlopen(url + "/api/info", timeout=1)
+            urllib.request.urlopen(url + "/health", timeout=1)
+            print("内部服务已启动：" + url)
             return url
         except Exception:
             time.sleep(0.1)
