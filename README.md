@@ -11,6 +11,8 @@
 - **打开文件**：从电脑上选择代码文件载入，修改后 Ctrl+S 保存回原文件（覆盖前自动备份到 `.backups`）。
 - **检查文件夹**：一次检查整个文件夹里的 Python / JavaScript 文件（自动跳过 node_modules、.git、虚拟环境等），
   列出每个文件的问题，点问题即可打开文件并跳到那一行。只做静态检查，不会运行文件夹里的代码。
+- **AI 审查整个文件夹**：AI 阅读整个项目，找出逻辑错误、安全隐患、错误处理、性能和结构问题，
+  按严重程度排列并给出改法；还会总结写得好的地方和下一步建议。开始前会告诉你要发送多少内容。
 - **桌面应用**：独立窗口，不用浏览器；关掉窗口即退出。
 - **自动更新**：启动时自动更新，或在应用里点“一键更新”。
 
@@ -59,6 +61,7 @@ python -m codecheck 我的代码.py --explain-lang English  # 用英文讲解
 python -m codecheck 我的代码.py --json                  # 输出 JSON，给其他程序调用
 python -m codecheck 我的代码.py --tests                 # 让 AI 生成测试并运行
 python -m codecheck D:\我的项目                          # 检查整个文件夹
+python -m codecheck D:\我的项目 --ai-review              # 再让 AI 审查整个项目
 ```
 
 ## 用法二：桌面应用
@@ -92,6 +95,7 @@ codecheck/
   core.py          把上面几步串起来
   testgen.py       AI 生成测试 + 逐个运行
   folder.py        检查整个文件夹
+  folder_ai.py     AI 审查整个文件夹
   files.py         打开 / 保存文件、选择文件对话框
   app.py           桌面应用窗口
   updater.py       自动更新

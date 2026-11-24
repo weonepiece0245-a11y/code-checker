@@ -162,10 +162,10 @@ def analyze(language_name: str, code: str, issues: list, run: dict | None, stdin
 
 # ---------- 结构化输出（生成测试等功能用）----------
 
-def _structured_api(system: str, user: str, schema: dict) -> dict:
+def _structured_api(system: str, user: str, schema: dict, timeout: int = 600) -> dict:
     import anthropic
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=timeout)
     try:
         resp = client.beta.messages.create(
             model=MODEL,
@@ -186,7 +186,7 @@ def _structured_api(system: str, user: str, schema: dict) -> dict:
     return json.loads(text)
 
 
-def _structured_cli(system: str, user: str, schema: dict) -> dict:
+def _structured_cli(system: str, user: str, schema: dict, timeout: int = 400) -> dict:
     exe = find_claude()
     if not exe:
         raise RuntimeError("没有找到 claude 命令，请先安装并登录 Claude Code")
@@ -199,7 +199,7 @@ def _structured_cli(system: str, user: str, schema: dict) -> dict:
         cmd += ["--model", MODEL]
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     try:
-        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=400, creationflags=NO_WINDOW,
+        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=timeout, creationflags=NO_WINDOW,
                            encoding="utf-8", errors="replace", env=env)
     except subprocess.TimeoutExpired:
         raise RuntimeError("Claude Code 响应超时") from None
@@ -216,11 +216,12 @@ def _structured_cli(system: str, user: str, schema: dict) -> dict:
     return json.loads(out.get("result", "{}"))
 
 
-def structured(system: str, user: str, schema: dict, backend: str = "auto") -> tuple[str, dict]:
+def structured(system: str, user: str, schema: dict, backend: str = "auto",
+               timeout: int = 400) -> tuple[str, dict]:
     """让 AI 按 JSON Schema 返回结果。返回 (使用的后端, 数据)。"""
     backend = pick_backend(backend)
     if backend == "api":
-        return "api", _structured_api(system, user, schema)
+        return "api", _structured_api(system, user, schema, timeout)
     if backend == "cli":
-        return "cli", _structured_cli(system, user, schema)
+        return "cli", _structured_cli(system, user, schema, timeout)
     raise RuntimeError("这个功能需要 AI：请登录 Claude Code 或设置 API key")

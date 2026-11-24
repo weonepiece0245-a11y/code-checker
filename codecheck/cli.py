@@ -44,6 +44,7 @@ def main(argv=None):
     p.add_argument("--explain-lang", default="简体中文", help="AI 讲解使用的语言（默认简体中文）")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     p.add_argument("--tests", action="store_true", help="让 AI 生成测试并逐个运行")
+    p.add_argument("--ai-review", action="store_true", help="检查文件夹时，再让 AI 审查整个项目")
     a = p.parse_args(argv)
 
     if a.file != "-" and os.path.isdir(a.file):
@@ -53,6 +54,14 @@ def main(argv=None):
             print(json.dumps(r, ensure_ascii=False, indent=2))
         else:
             print(folder.format_report(r))
+        if a.ai_review:
+            from . import folder_ai
+            print(color("\n━━ AI 审查整个文件夹（可能需要 1~3 分钟）━━", "bold"))
+            try:
+                print(folder_ai.format_report(folder_ai.review(a.file, a.explain_lang,
+                                                               "auto" if a.ai == "none" else a.ai)))
+            except Exception as e:
+                print(color("AI 审查失败：" + str(e), "yellow"))
         return 1 if r["with_errors"] else 0
 
     code = sys.stdin.read() if a.file == "-" else open(a.file, encoding="utf-8").read()

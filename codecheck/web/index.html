@@ -75,6 +75,15 @@ button.second{background:transparent;color:var(--accent);border:1px solid var(--
 .fissue:hover{background:var(--code)}
 .fissue .ln{color:var(--accent);font-weight:600}
 .linkbtn{background:none;border:0;color:var(--accent);padding:0;font-size:13px;cursor:pointer;text-decoration:underline}
+.rv{border:1px solid var(--line);border-left-width:4px;border-radius:8px;margin:8px 0;padding:8px 12px}
+.rv.high{border-left-color:var(--err)} .rv.medium{border-left-color:#ea580c} .rv.low{border-left-color:var(--warn)}
+.rv .t{font-weight:600}
+.rv .meta{font-size:12.5px;color:var(--muted);margin:2px 0 6px}
+.rv .meta a{color:var(--accent);cursor:pointer}
+.rv .lbl{font-size:12.5px;color:var(--muted);margin-top:6px}
+.rv .txt{font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+.tag{font-size:12px;padding:0 6px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+button.ai{background:linear-gradient(90deg,#2563eb,#7c3aed)}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -118,6 +127,7 @@ button.second{background:transparent;color:var(--accent);border:1px solid var(--
   </section>
   <div class="col">
     <section class="panel" id="folderout" style="display:none"></section>
+    <section class="panel" id="folderai" style="display:none"></section>
     <section class="panel" id="out"><p class="muted">结果会显示在这里。</p></section>
     <section class="panel" id="testsout" style="display:none"></section>
   </div>
@@ -277,7 +287,8 @@ function renderFolder(r) {
      + (r.with_warnings ? `，${r.with_warnings} 个只有警告` : "") + `。只做了静态检查，没有运行这些文件。点问题可以打开文件并跳到那一行。</p>`;
   if (r.truncated) h += `<p style="color:var(--warn);font-size:13px">文件太多，只检查了前 500 个。</p>`;
   r.notes.forEach(n => h += `<p style="color:var(--warn);font-size:13px">${esc(n)}</p>`);
-  h += `<div class="row" style="margin:4px 0"><button class="ghost" id="rescan">重新检查文件夹</button><button class="ghost" id="closefolder">关闭</button></div>`;
+  h += `<div class="row" style="margin:4px 0">${r.total ? '<button class="ai" id="aireview">🤖 AI 审查整个文件夹</button>' : ""}
+        <button class="ghost" id="rescan">重新检查文件夹</button><button class="ghost" id="closefolder">关闭</button></div>`;
   if (!r.total) h += `<p class="muted">这个文件夹里没有找到 .py 或 .js 文件。</p>`;
   bad.forEach((f, idx) => {
     h += `<details class="frow ${f.errors ? "err" : "warn"}" ${idx < 5 ? "open" : ""}>
@@ -300,9 +311,66 @@ function renderFolder(r) {
     openFile(el.dataset.open, el.dataset.line ? +el.dataset.line : 0);
   });
   $("rescan").onclick = () => scanFolder(lastFolder);
-  $("closefolder").onclick = () => { box.style.display = "none"; lastFolder = null; };
+  $("closefolder").onclick = () => { box.style.display = "none"; $("folderai").style.display = "none"; lastFolder = null; };
+  if ($("aireview")) $("aireview").onclick = aiReview;
 }
 $("openfolder").onclick = () => scanFolder();
+
+// ---------- AI 审查整个文件夹 ----------
+const SEV = {high: "🔴 严重", medium: "🟠 中等", low: "🟡 轻微"};
+const CAT = {bug: "逻辑错误", security: "安全", performance: "性能", error_handling: "错误处理",
+             structure: "结构", readability: "可读性"};
+async function aiReview() {
+  const box = $("folderai"), path = lastFolder;
+  if (!path) return;
+  try {
+    const plan = await post("/api/fs/ai_plan", {path});
+    if (plan.error) throw new Error(plan.error);
+    const words = plan.chars > 10000 ? Math.round(plan.chars / 1000) + " 千" : plan.chars;
+    let msg = `AI 将阅读 ${plan.files} 个文件（约 ${words} 个字符），大约需要 1~3 分钟，会使用你的 Claude 额度。`;
+    if (plan.skipped.length) msg += `\n\n文件比较多，有 ${plan.skipped.length} 个文件超出一次能审查的篇幅，这次不会审查（有错误的文件会优先审查）。`;
+    if (!confirm(msg + "\n\n确定开始吗？")) return;
+    box.style.display = "";
+    box.innerHTML = `<p><span class="spinner"></span> AI 正在阅读 ${plan.files} 个文件并审查，大约需要 1~3 分钟…</p>`;
+    box.scrollIntoView({behavior: "smooth", block: "start"});
+    $("aireview").disabled = true;
+    const ai = $("ai").value === "none" ? "auto" : $("ai").value;
+    const d = await post("/api/fs/ai_review", {path, ai, explain_lang: $("explain").value});
+    if (d.error) throw new Error(d.error);
+    renderReview(d);
+  } catch (e) {
+    box.style.display = "";
+    box.innerHTML = '<p style="color:var(--err)">AI 审查失败：' + esc(e.message) + '</p>';
+  } finally { if ($("aireview")) $("aireview").disabled = false; }
+}
+function renderReview(d) {
+  const box = $("folderai");
+  const n = s => d.issues.filter(i => i.severity === s).length;
+  let h = `<h2>🤖 AI 审查报告</h2>
+    <p style="margin:0 0 6px">${esc(d.overview)}</p>
+    <p class="muted" style="font-size:13px;margin:0 0 8px">审查了 ${d.reviewed.length} 个文件
+      ${d.skipped.length ? `，${d.skipped.length} 个因为篇幅限制没有审查` : ""}。
+      发现 ${d.issues.length} 个问题：严重 ${n("high")} · 中等 ${n("medium")} · 轻微 ${n("low")}</p>`;
+  if (!d.issues.length) h += `<p style="color:var(--ok)">✓ AI 没有发现值得报告的问题。</p>`;
+  d.issues.forEach((i, k) => {
+    const where = esc(i.file) + (i.line ? ` 第 ${i.line} 行` : "");
+    h += `<div class="rv ${i.severity}">
+      <div class="t">${k + 1}. ${esc(i.title)}</div>
+      <div class="meta">${SEV[i.severity] || ""} · <span class="tag">${CAT[i.category] || i.category}</span> ·
+        ${i.path ? `<a data-open="${esc(i.path)}" data-line="${i.line || 0}">📄 ${where}</a>` : where}</div>
+      <div class="txt">${esc(i.explanation)}</div>
+      <div class="lbl">怎么改</div><div class="txt">${esc(i.suggestion)}</div>
+    </div>`;
+  });
+  if (d.strengths.length) h += `<h2>👍 写得好的地方</h2><ul>${d.strengths.map(s => `<li>${esc(s)}</li>`).join("")}</ul>`;
+  if (d.next_steps.length) h += `<h2>👉 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
+  if (d.skipped.length) h += `<details><summary class="muted" style="cursor:pointer;font-size:13px">没有审查的文件（${d.skipped.length} 个）</summary>
+      <div class="muted" style="font-size:12.5px;overflow-wrap:anywhere">${d.skipped.map(esc).join("<br>")}</div></details>`;
+  box.innerHTML = h;
+  box.querySelectorAll("[data-open]").forEach(el => el.onclick = e => {
+    e.preventDefault(); openFile(el.dataset.open, +el.dataset.line || 0);
+  });
+}
 
 // ---------- AI 生成测试 ----------
 let lastTests = null;  // {summary, tests, language}

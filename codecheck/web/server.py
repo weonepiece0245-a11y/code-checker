@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .. import __version__, files, folder, testgen, updater
+from .. import __version__, files, folder, folder_ai, testgen, updater
 from ..ai import pick_backend
 from ..core import check_code
 
@@ -167,6 +167,30 @@ class SaveRequest(BaseModel):
 def fs_save(req: SaveRequest):
     try:
         return files.save(req.path, req.content, req.encoding, req.crlf)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/fs/ai_plan")
+def fs_ai_plan(req: PathRequest):
+    try:
+        p = folder_ai.plan(req.path)
+        return {"files": len(p["included"]), "chars": p["chars"], "skipped": p["skipped"],
+                "total": p["scan"]["total"]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+class AIReviewRequest(BaseModel):
+    path: str
+    ai: str = "auto"
+    explain_lang: str = "简体中文"
+
+
+@app.post("/api/fs/ai_review")
+def fs_ai_review(req: AIReviewRequest):
+    try:
+        return folder_ai.review(req.path, req.explain_lang, "auto" if req.ai == "none" else req.ai)
     except Exception as e:
         return {"error": str(e)}
 
