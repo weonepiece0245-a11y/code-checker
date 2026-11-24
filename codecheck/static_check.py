@@ -110,9 +110,10 @@ def _to_issue(item: dict, include_syntax: bool) -> Issue | None:
     if not code or code == "invalid-syntax":
         if not include_syntax:
             return None
-        code, sev = "SyntaxError", "error"
-    else:
-        sev = "error" if code in ERROR_RULES or code.startswith("F7") else "warning"
+        msg = item["message"].removeprefix("SyntaxError:").strip()
+        return Issue(item["location"]["row"], item["location"]["column"], "SyntaxError",
+                     f"语法错误，代码写法不对，程序无法运行（{msg}）", "error")
+    sev = "error" if code in ERROR_RULES or code.startswith("F7") else "warning"
     return Issue(item["location"]["row"], item["location"]["column"], code, _zh(code, item["message"]), sev)
 
 
