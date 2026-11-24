@@ -1,5 +1,7 @@
 """网页版：python -m codecheck.web.server  然后浏览器打开 http://127.0.0.1:8765"""
 import os
+import sys
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -69,6 +71,8 @@ def check(req: CheckRequest):
 def _port_free(port: int) -> bool:
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        if sys.platform != "win32":  # 和 uvicorn 一致，忽略刚关闭连接的 TIME_WAIT 状态
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("127.0.0.1", port))
             return True
@@ -93,6 +97,12 @@ def main():
 
     import uvicorn
     port = int(os.environ.get("PORT", "8765"))
+    # 更新后重启时，旧进程刚退出，端口可能还要几秒才释放，等一等
+    wait = 15 if os.environ.get("CODECHECK_NO_BROWSER") else 3
+    for _ in range(wait * 2):
+        if _port_free(port) or _is_ours(port):
+            break
+        time.sleep(0.5)
     if not _port_free(port):
         if _is_ours(port):
             print(f"代码检查助手已经在运行了（另一个窗口里）：http://127.0.0.1:{port}")
