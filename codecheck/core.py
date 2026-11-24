@@ -8,7 +8,7 @@ from .languages import LANGUAGES, detect
 
 def check_code(code: str, filename: str | None = None, language: str | None = None, stdin: str = "",
                run: bool = True, timeout: int = 5, memory_mb: int = 256, sandbox: str = "local",
-               ai_backend: str = "auto", explain_lang: str = "简体中文") -> dict:
+               ai_backend: str = "auto", explain_lang: str = "简体中文", workdir: str | None = None) -> dict:
     lang = LANGUAGES[language] if language else detect(filename, code)
     with tempfile.TemporaryDirectory(prefix="codecheck_") as tmp:
         os.chmod(tmp, 0o755)
@@ -20,7 +20,7 @@ def check_code(code: str, filename: str | None = None, language: str | None = No
         run_error = ""
         if run:
             try:
-                result = runner.run(lang, path, stdin, timeout, memory_mb, sandbox).to_dict()
+                result = runner.run(lang, path, stdin, timeout, memory_mb, sandbox, workdir=workdir).to_dict()
             except RuntimeError as e:
                 run_error = str(e)
         # 报错信息里的临时路径换成文件名，读起来更清楚

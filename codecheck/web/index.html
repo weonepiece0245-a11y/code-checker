@@ -59,6 +59,22 @@ button.second{background:transparent;color:var(--accent);border:1px solid var(--
 .test .kv{font-size:13px;margin:4px 0 0 22px}
 .test .kv b{color:var(--muted);font-weight:500}
 .test pre{margin:3px 0}
+.filebar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.filebar button{padding:6px 12px;font-size:13.5px}
+#filename{font-size:13px;color:var(--muted);overflow-wrap:anywhere;flex:1;min-width:120px}
+#filename b{color:var(--text);font-weight:600}
+#toast{font-size:13px;color:var(--ok)}
+.frow{border:1px solid var(--line);border-radius:8px;margin:6px 0;padding:6px 10px}
+.frow summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.frow summary::-webkit-details-marker{display:none}
+.frow .fname{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;overflow-wrap:anywhere}
+.frow.err{border-color:var(--err)} .frow.warn{border-color:var(--warn)}
+.cnt{font-size:12px;padding:0 6px;border-radius:99px}
+.cnt.e{color:var(--err);border:1px solid var(--err)} .cnt.w{color:var(--warn);border:1px solid var(--warn)}
+.fissue{font-size:13px;padding:3px 6px;margin:3px 0 3px 18px;border-radius:4px;cursor:pointer;overflow-wrap:anywhere}
+.fissue:hover{background:var(--code)}
+.fissue .ln{color:var(--accent);font-weight:600}
+.linkbtn{background:none;border:0;color:var(--accent);padding:0;font-size:13px;cursor:pointer;text-decoration:underline}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -73,6 +89,13 @@ button.second{background:transparent;color:var(--accent);border:1px solid var(--
 <div id="updbar"><span id="updmsg"></span><button id="updbtn">一键更新</button></div>
 <main>
   <section class="panel">
+    <div class="filebar">
+      <button class="second" id="openfile">📄 打开文件</button>
+      <button class="second" id="openfolder">📁 检查文件夹</button>
+      <button class="second" id="savefile" disabled>💾 保存（Ctrl+S）</button>
+      <span id="filename">没有打开文件（也可以直接粘贴代码）</span>
+      <span id="toast"></span>
+    </div>
     <div class="row">
       <label>编程语言 <select id="lang"><option value="">自动识别</option><option value="python">Python</option><option value="javascript">JavaScript</option></select></label>
       <label>示例 <select id="sample"><option value="">选择一个有 bug 的例子…</option></select></label>
@@ -94,6 +117,7 @@ button.second{background:transparent;color:var(--accent);border:1px solid var(--
     <div class="muted" id="aiinfo" style="font-size:12px"></div>
   </section>
   <div class="col">
+    <section class="panel" id="folderout" style="display:none"></section>
     <section class="panel" id="out"><p class="muted">结果会显示在这里。</p></section>
     <section class="panel" id="testsout" style="display:none"></section>
   </div>
@@ -146,6 +170,140 @@ fetch("/api/info").then(r => r.json()).then(d => {
   $("ver").textContent = "版本 " + d.version;
   $("aiinfo").textContent = "自动模式当前会使用：" + ({api:"API key", cli:"Claude Code 订阅（claude 命令）", none:"不用 AI（没找到 API key 也没找到 claude 命令）"}[d.ai_auto]);
 });
+// ---------- 打开 / 保存文件 ----------
+let curFile = null;  // {path, name, encoding, crlf, saved}
+let lastFolder = null;
+const dirOf = p => p.replace(/[\\/][^\\/]*$/, "");
+function isDirty() { return curFile && $("code").value !== curFile.saved; }
+function showFile() {
+  if (!curFile) { $("filename").textContent = "没有打开文件（也可以直接粘贴代码）"; $("savefile").disabled = true; return; }
+  $("filename").innerHTML = `<b>${esc(curFile.name)}</b>${isDirty() ? ' <span style="color:var(--warn)">● 未保存</span>' : ""}<br>${esc(curFile.path)}`;
+  $("savefile").disabled = !isDirty();
+  document.title = (isDirty() ? "● " : "") + curFile.name + " - 代码检查助手";
+}
+function toast(msg, bad) {
+  $("toast").style.color = bad ? "var(--err)" : "var(--ok)";
+  $("toast").textContent = msg;
+  clearTimeout(toast.t); toast.t = setTimeout(() => $("toast").textContent = "", 4000);
+}
+$("code").addEventListener("input", showFile);
+
+async function openFile(path, line) {
+  if (isDirty() && (!path || path !== curFile.path)
+      && !confirm(`“${curFile.name}” 还没有保存，确定要打开别的文件吗？（没保存的修改会丢失）`)) return;
+  try {
+    if (!path) {
+      const p = await post("/api/fs/pick", {kind: "file"});
+      if (p.error) throw new Error(p.error);
+      if (p.cancelled) return;
+      path = p.path;
+    }
+    if (!(curFile && curFile.path === path && isDirty())) {
+      const f = await post("/api/fs/read", {path});
+      if (f.error) throw new Error(f.error);
+      $("code").value = f.content;
+      if (f.language) $("lang").value = f.language;
+      curFile = {path: f.path, name: f.name, encoding: f.encoding, crlf: f.crlf, saved: f.content};
+      $("stdin").value = "";
+      $("out").innerHTML = '<p class="muted">已打开文件，点“检查”开始。</p>';
+      $("testsout").style.display = "none"; lastTests = null;
+    }
+    showFile();
+    if (line) gotoLine(line);
+  } catch (e) { toast("打开失败：" + e.message, true); }
+}
+
+async function saveFile() {
+  if (!curFile) { toast("请先用“打开文件”打开一个文件", true); return; }
+  if (!isDirty()) { toast("没有需要保存的修改"); return; }
+  try {
+    const content = $("code").value;
+    const r = await post("/api/fs/save", {path: curFile.path, content, encoding: curFile.encoding, crlf: curFile.crlf});
+    if (r.error) throw new Error(r.error);
+    curFile.saved = content; curFile.encoding = r.encoding;
+    showFile();
+    toast("已保存 ✓（原文件已备份）");
+    if (lastFolder) scanFolder(lastFolder, true);
+  } catch (e) { toast("保存失败：" + e.message, true); }
+}
+
+function gotoLine(n) {
+  const ta = $("code"), lines = ta.value.split("\n");
+  n = Math.max(1, Math.min(n, lines.length));
+  let pos = 0;
+  for (let i = 0; i < n - 1; i++) pos += lines[i].length + 1;
+  ta.focus();
+  ta.setSelectionRange(pos, pos + lines[n - 1].length);
+  const lh = parseFloat(getComputedStyle(ta).lineHeight) || 20;
+  ta.scrollTop = Math.max(0, (n - 4) * lh);
+  ta.scrollIntoView({behavior: "smooth", block: "center"});
+}
+
+$("openfile").onclick = () => openFile();
+$("savefile").onclick = saveFile;
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveFile(); }
+});
+window.addEventListener("beforeunload", e => { if (isDirty()) { e.preventDefault(); e.returnValue = ""; } });
+
+// ---------- 检查文件夹 ----------
+async function scanFolder(path, quiet) {
+  const box = $("folderout");
+  try {
+    if (!path) {
+      const p = await post("/api/fs/pick", {kind: "folder"});
+      if (p.error) throw new Error(p.error);
+      if (p.cancelled) return;
+      path = p.path;
+    }
+    lastFolder = path;
+    box.style.display = "";
+    if (!quiet) box.innerHTML = '<p><span class="spinner"></span> 正在检查文件夹里的所有代码文件…</p>';
+    const r = await post("/api/fs/scan", {path});
+    if (r.error) throw new Error(r.error);
+    renderFolder(r);
+  } catch (e) {
+    box.style.display = "";
+    box.innerHTML = '<p style="color:var(--err)">检查文件夹失败：' + esc(e.message) + '</p>';
+  }
+}
+
+function renderFolder(r) {
+  const box = $("folderout");
+  const ok = r.files.filter(f => !f.issues.length);
+  const bad = r.files.filter(f => f.issues.length);
+  let h = `<h2>📁 文件夹检查 <span class="badge ${r.with_errors ? "bad" : "ok"}">${r.with_errors ? r.with_errors + " 个文件有错误" : "没有错误"}</span></h2>`;
+  h += `<p class="muted" style="margin:0 0 6px;overflow-wrap:anywhere">${esc(r.folder)}<br>共 ${r.total} 个代码文件`
+     + (r.with_warnings ? `，${r.with_warnings} 个只有警告` : "") + `。只做了静态检查，没有运行这些文件。点问题可以打开文件并跳到那一行。</p>`;
+  if (r.truncated) h += `<p style="color:var(--warn);font-size:13px">文件太多，只检查了前 500 个。</p>`;
+  r.notes.forEach(n => h += `<p style="color:var(--warn);font-size:13px">${esc(n)}</p>`);
+  h += `<div class="row" style="margin:4px 0"><button class="ghost" id="rescan">重新检查文件夹</button><button class="ghost" id="closefolder">关闭</button></div>`;
+  if (!r.total) h += `<p class="muted">这个文件夹里没有找到 .py 或 .js 文件。</p>`;
+  bad.forEach((f, idx) => {
+    h += `<details class="frow ${f.errors ? "err" : "warn"}" ${idx < 5 ? "open" : ""}>
+      <summary><span>${f.errors ? "✗" : "!"}</span><span class="fname">${esc(f.rel)}</span>
+        ${f.errors ? `<span class="cnt e">${f.errors} 错误</span>` : ""}${f.warnings ? `<span class="cnt w">${f.warnings} 警告</span>` : ""}
+        <button class="linkbtn" data-open="${esc(f.path)}">打开</button></summary>
+      ${f.issues.map(i => `<div class="fissue" data-open="${esc(f.path)}" data-line="${i.line}">
+        <span class="ln">第 ${i.line} 行</span> <span style="color:${i.severity === "error" ? "var(--err)" : "var(--warn)"}">${i.severity === "error" ? "错误" : "警告"}</span>
+        <code>${esc(i.code)}</code> ${esc(i.message)}</div>`).join("")}
+    </details>`;
+  });
+  if (ok.length) {
+    h += `<details class="frow"><summary><span style="color:var(--ok)">✓</span><span>${ok.length} 个文件没有发现问题</span></summary>
+      ${ok.map(f => `<div class="fissue" data-open="${esc(f.path)}"><span class="fname">${esc(f.rel)}</span> <span class="muted">${f.lines} 行</span></div>`).join("")}
+    </details>`;
+  }
+  box.innerHTML = h;
+  box.querySelectorAll("[data-open]").forEach(el => el.onclick = e => {
+    e.preventDefault(); e.stopPropagation();
+    openFile(el.dataset.open, el.dataset.line ? +el.dataset.line : 0);
+  });
+  $("rescan").onclick = () => scanFolder(lastFolder);
+  $("closefolder").onclick = () => { box.style.display = "none"; lastFolder = null; };
+}
+$("openfolder").onclick = () => scanFolder();
+
 // ---------- AI 生成测试 ----------
 let lastTests = null;  // {summary, tests, language}
 async function post(url, body) {
@@ -266,7 +424,8 @@ async function go() {
     const r = await fetch("/api/check", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({code, language: $("lang").value || null, stdin: $("stdin").value,
         run: $("run").checked, timeout: +$("timeout").value || 5, sandbox: $("sandbox").value,
-        ai: $("ai").value, explain_lang: $("explain").value})});
+        ai: $("ai").value, explain_lang: $("explain").value,
+        workdir: curFile ? dirOf(curFile.path) : null})});
     if (!r.ok) throw new Error("服务器返回 " + r.status + "：" + await r.text());
     render(await r.json());
   } catch (e) { $("out").innerHTML = '<p style="color:var(--err)">出错了：' + esc(e.message) + '</p>'; }
@@ -311,6 +470,7 @@ function addCodeButtons() {
     put.className = "ghost"; put.textContent = "放回编辑器";
     put.onclick = () => {
       $("code").value = code.replace(/\n$/, "");
+      showFile();
       $("code").scrollIntoView({behavior: "smooth", block: "center"});
       put.textContent = "已放回 ✓，可以再点一次检查";
       setTimeout(() => put.textContent = "放回编辑器", 3000);

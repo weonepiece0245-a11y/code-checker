@@ -128,6 +128,24 @@ def _run_webview(port: int) -> bool:
                                     min_size=(900, 600), text_select=True)
         win.events.shown += lambda: _set_icon(win)
 
+        def picker(kind: str):
+            FD = getattr(webview, "FileDialog", None)
+            if kind == "folder":
+                r = win.create_file_dialog(FD.FOLDER if FD else webview.FOLDER_DIALOG)
+            else:
+                dlg = FD.OPEN if FD else webview.OPEN_DIALOG
+                try:
+                    r = win.create_file_dialog(dlg, file_types=("Code files (*.py;*.js;*.mjs;*.cjs)",
+                                                                "All files (*.*)"))
+                except Exception:
+                    r = win.create_file_dialog(dlg)
+            if not r:
+                return None
+            return r[0] if isinstance(r, (list, tuple)) else r
+
+        from . import files
+        files.PICKER = picker
+
         def boot():
             try:
                 win.load_url(_start_server(port))

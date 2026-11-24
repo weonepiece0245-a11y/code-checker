@@ -31,7 +31,7 @@ def indent_tail(text, max_lines=30):
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="codecheck", description="检查代码、运行测试、AI 解释错误")
-    p.add_argument("file", help="要检查的代码文件，用 - 表示从标准输入读取")
+    p.add_argument("file", help="要检查的代码文件或文件夹，用 - 表示从标准输入读取")
     p.add_argument("--lang", choices=["python", "javascript"], help="编程语言（默认按后缀自动识别）")
     p.add_argument("--input", default="", help="运行时喂给程序的输入内容")
     p.add_argument("--input-file", help="从文件读取运行时输入")
@@ -46,12 +46,22 @@ def main(argv=None):
     p.add_argument("--tests", action="store_true", help="让 AI 生成测试并逐个运行")
     a = p.parse_args(argv)
 
+    if a.file != "-" and os.path.isdir(a.file):
+        from . import folder
+        r = folder.scan(a.file)
+        if a.json:
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+        else:
+            print(folder.format_report(r))
+        return 1 if r["with_errors"] else 0
+
     code = sys.stdin.read() if a.file == "-" else open(a.file, encoding="utf-8").read()
     stdin = open(a.input_file, encoding="utf-8").read() if a.input_file else a.input.replace("\\n", "\n")
     if not a.json and a.ai != "none":
         print(color("正在检查并请 AI 分析，可能需要几十秒……", "dim"), file=sys.stderr)
     r = check_code(code, None if a.file == "-" else a.file, a.lang, stdin, not a.no_run,
-                   a.timeout, sandbox=a.sandbox, ai_backend=a.ai, explain_lang=a.explain_lang)
+                   a.timeout, sandbox=a.sandbox, ai_backend=a.ai, explain_lang=a.explain_lang,
+                   workdir=None if a.file == "-" else os.path.dirname(os.path.abspath(a.file)))
 
     if a.json:
         print(json.dumps(r, ensure_ascii=False, indent=2))

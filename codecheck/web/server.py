@@ -4,17 +4,35 @@ import sys
 import time
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .. import __version__, testgen, updater
+from .. import __version__, files, folder, testgen, updater
 from ..ai import pick_backend
 from ..core import check_code
 
 app = FastAPI(title="代码检查助手")
 PAGE = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+LOCAL_HOSTS = {"127.0.0.1", "localhost"}
+
+
+@app.middleware("http")
+async def local_only(request: Request, call_next):
+    """只接受本应用自己发来的请求：防止其他网页偷偷调用本机服务（运行代码、读写文件）。"""
+    host = (request.headers.get("host") or "").rsplit(":", 1)[0]
+    origin = request.headers.get("origin")
+    if host not in LOCAL_HOSTS:
+        return PlainTextResponse("forbidden", status_code=403)
+    if origin and origin != "null":
+        from urllib.parse import urlparse
+        o = urlparse(origin)
+        if o.hostname not in LOCAL_HOSTS or (o.port and str(o.port) != str(request.url.port)):
+            return PlainTextResponse("forbidden", status_code=403)
+    return await call_next(request)
+
+
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
@@ -27,6 +45,7 @@ class CheckRequest(BaseModel):
     sandbox: str = "local"
     ai: str = "auto"
     explain_lang: str = "简体中文"
+    workdir: str | None = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -106,7 +125,58 @@ def tests_run(req: RunTestsRequest):
 @app.post("/api/check")
 def check(req: CheckRequest):
     return check_code(req.code, None, req.language or None, req.stdin, req.run, req.timeout,
-                      sandbox=req.sandbox, ai_backend=req.ai, explain_lang=req.explain_lang)
+                      sandbox=req.sandbox, ai_backend=req.ai, explain_lang=req.explain_lang,
+                      workdir=req.workdir)
+
+
+# ---------- 文件和文件夹 ----------
+
+class PickRequest(BaseModel):
+    kind: str = "file"  # file / folder
+
+
+@app.post("/api/fs/pick")
+def fs_pick(req: PickRequest):
+    try:
+        path = files.pick("folder" if req.kind == "folder" else "file")
+    except Exception as e:
+        return {"error": f"打不开选择窗口：{e}"}
+    return {"path": path} if path else {"cancelled": True}
+
+
+class PathRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/fs/read")
+def fs_read(req: PathRequest):
+    try:
+        return files.read(req.path)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+class SaveRequest(BaseModel):
+    path: str
+    content: str = Field(max_length=1_000_000)
+    encoding: str = "utf-8"
+    crlf: bool = False
+
+
+@app.post("/api/fs/save")
+def fs_save(req: SaveRequest):
+    try:
+        return files.save(req.path, req.content, req.encoding, req.crlf)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/fs/scan")
+def fs_scan(req: PathRequest):
+    try:
+        return folder.scan(req.path)
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _port_free(port: int) -> bool:

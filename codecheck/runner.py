@@ -73,15 +73,16 @@ def _clean_env(workdir: str) -> dict:
 
 
 def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: int,
-              extra_args: list | None = None) -> RunResult:
+              extra_args: list | None = None, workdir: str | None = None) -> RunResult:
     cmd = [part.replace("{file}", path) for part in lang.run_cmd] + list(extra_args or [])
     if cmd[0] == "python3":
         cmd[0] = console_python()
-    env = _clean_env(os.path.dirname(path))
+    cwd = workdir if workdir and os.path.isdir(workdir) else os.path.dirname(path)
+    env = _clean_env(cwd)
     start = time.monotonic()
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             creationflags=NO_WINDOW,
-                            cwd=os.path.dirname(path), env=env, text=True, encoding="utf-8",
+                            cwd=cwd, env=env, text=True, encoding="utf-8",
                             errors="replace", preexec_fn=_limits(lang.key, timeout, memory_mb))
     timed_out = False
     try:
@@ -128,8 +129,9 @@ def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: i
 
 
 def run(lang: Language, path: str, stdin: str = "", timeout: int = 5, memory_mb: int = 256,
-        mode: str = "local", sandbox: str | None = None, extra_args: list | None = None) -> RunResult:
+        mode: str = "local", sandbox: str | None = None, extra_args: list | None = None,
+        workdir: str | None = None) -> RunResult:
     mode = sandbox or mode
     if mode == "docker":
         return run_docker(lang, path, stdin, timeout, memory_mb, extra_args)
-    return run_local(lang, path, stdin, timeout, memory_mb, extra_args)
+    return run_local(lang, path, stdin, timeout, memory_mb, extra_args, workdir)

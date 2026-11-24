@@ -48,21 +48,102 @@ def check_python(path: str) -> list[Issue]:
         msg = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "语法错误"
         issues.append(Issue(line, 0, "SyntaxError", msg, "error"))
     # 2) ruff：常见 bug（未定义变量、未使用导入、可变默认参数等）
-    rules = "E9,F,B,E711,E712,E722,W605"
     try:
-        r = subprocess.run(creationflags=NO_WINDOW, args=_ruff_cmd() + ["check", "--isolated", "--select", rules,
-                                          "--output-format", "json", "--no-cache", path],
-                           capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
-        for item in json.loads(r.stdout or "[]"):
-            code = item.get("code")
-            if not code or code == "invalid-syntax":  # 语法错误上面已经报过了
-                continue
-            sev = "error" if code in ERROR_RULES or code.startswith("F7") else "warning"
-            issues.append(Issue(item["location"]["row"], item["location"]["column"],
-                                item["code"], item["message"], sev))
-    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
-        issues.append(Issue(0, 0, "tool", "没有找到 ruff，跳过深度检查（pip install ruff）", "warning"))
+        issues += ruff_many([path], include_syntax=False).get(path, [])
+    except RuntimeError as e:
+        issues.append(Issue(0, 0, "tool", str(e), "warning"))
     return issues
+
+
+RUFF_RULES = "E9,F,B,E711,E712,E722,W605"
+
+# 常见规则的中文说明（显示为“中文说明（英文原文）”）
+ZH = {
+    "F821": "用了一个没有定义的名字，可能是拼写错误或忘了定义/导入",
+    "F822": "__all__ 里列出了不存在的名字",
+    "F823": "在给局部变量赋值之前就使用了它",
+    "F401": "导入了但没有使用",
+    "F811": "重复定义了同一个名字，前面的定义被覆盖了",
+    "F841": "变量赋值后从来没有用过",
+    "F632": "用 is 比较数字或字符串，应该用 ==",
+    "F601": "字典里有重复的键",
+    "F541": "f 字符串里没有 {} 占位符",
+    "F403": "使用了 from ... import *，很难知道导入了什么",
+    "F405": "这个名字可能来自 import *，无法确定是否定义",
+    "F704": "yield 用在了函数外面",
+    "F706": "return 用在了函数外面",
+    "E711": "和 None 比较应该用 is None / is not None",
+    "E712": "和 True/False 比较应该直接写条件，或用 is",
+    "E722": "不要用空的 except:，它会把所有错误（包括按 Ctrl+C）都吞掉",
+    "E902": "读取文件失败",
+    "W605": "字符串里有无效的转义字符，可能需要用 r\"...\" 原始字符串",
+    "B006": "默认参数不要用列表、字典等可变对象，多次调用会共用同一个对象",
+    "B007": "循环变量在循环体里没有用到",
+    "B008": "默认参数里调用了函数，它只会在定义时执行一次",
+    "B011": "不要用 assert False，加 -O 运行时会被跳过",
+    "B018": "这一行的表达式没有任何作用",
+    "B904": "在 except 里重新抛出异常时，建议用 raise ... from err",
+}
+
+
+def _zh(code: str, message: str) -> str:
+    return f"{ZH[code]}（{message}）" if code in ZH else message
+
+
+def ruff_text(text: str, filename: str, include_syntax: bool = True) -> list[Issue]:
+    """检查一段文本（用于 GBK 等非 UTF-8 文件：先按正确编码解码，再交给 ruff）。"""
+    try:
+        r = subprocess.run(creationflags=NO_WINDOW,
+                           args=_ruff_cmd() + ["check", "--isolated", "--select", RUFF_RULES,
+                                               "--output-format", "json", "--no-cache",
+                                               "--stdin-filename", filename, "-"],
+                           input=text, capture_output=True, text=True, timeout=60,
+                           encoding="utf-8", errors="replace")
+        items = json.loads(r.stdout or "[]")
+    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        return []
+    return [i for i in (_to_issue(item, include_syntax) for item in items) if i]
+
+
+def _to_issue(item: dict, include_syntax: bool) -> Issue | None:
+    code = item.get("code")
+    if not code or code == "invalid-syntax":
+        if not include_syntax:
+            return None
+        code, sev = "SyntaxError", "error"
+    else:
+        sev = "error" if code in ERROR_RULES or code.startswith("F7") else "warning"
+    return Issue(item["location"]["row"], item["location"]["column"], code, _zh(code, item["message"]), sev)
+
+
+def ruff_many(paths: list[str], include_syntax: bool = True) -> dict[str, list[Issue]]:
+    """用 ruff 一次检查多个 Python 文件，返回 {文件路径: 问题列表}。"""
+    result: dict[str, list[Issue]] = {}
+    norm = {os.path.normcase(os.path.abspath(p)): p for p in paths}
+    for i in range(0, len(paths), 150):  # 分批，避免 Windows 命令行过长
+        batch = paths[i:i + 150]
+        try:
+            r = subprocess.run(creationflags=NO_WINDOW,
+                               args=_ruff_cmd() + ["check", "--isolated", "--select", RUFF_RULES,
+                                                   "--output-format", "json", "--no-cache", *batch],
+                               capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
+            items = json.loads(r.stdout or "[]")
+        except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            raise RuntimeError("没有找到 ruff，跳过深度检查（pip install ruff）") from None
+        for item in items:
+            key = norm.get(os.path.normcase(os.path.abspath(item["filename"])), item["filename"])
+            if item.get("code") == "E902":  # 不是 UTF-8（多半是 GBK），换个编码再查
+                try:
+                    with open(key, "rb") as f:
+                        text = f.read().decode("gbk")
+                    result.setdefault(key, []).extend(ruff_text(text, key, include_syntax))
+                    continue
+                except (OSError, UnicodeDecodeError):
+                    pass
+            issue = _to_issue(item, include_syntax)
+            if issue:
+                result.setdefault(key, []).append(issue)
+    return result
 
 
 def check_javascript(path: str) -> list[Issue]:
