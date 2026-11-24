@@ -1,8 +1,11 @@
 """网页版：python -m codecheck.web.server  然后浏览器打开 http://127.0.0.1:8765"""
 import os
+import secrets
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
@@ -14,7 +17,15 @@ from ..ai import pick_backend
 from ..core import check_code
 
 app = FastAPI(title="代码检查助手")
-PAGE = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+# 每次启动随机生成的令牌：写进页面，所有 /api 请求都要带上。别的网页拿不到它，就无法调用本机服务
+TOKEN = secrets.token_urlsafe(24)
+PAGE = (Path(__file__).parent / "index.html").read_text(encoding="utf-8").replace("{{TOKEN}}", TOKEN)
+# 同一时间最多运行 2 个检查/测试，避免把电脑占满
+RUN_SLOTS = threading.BoundedSemaphore(2)
+
+Lang = Literal["python", "javascript"]
+Sandbox = Literal["local", "docker"]
+AIBackend = Literal["auto", "api", "cli", "none"]
 LOCAL_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -30,6 +41,9 @@ async def local_only(request: Request, call_next):
         o = urlparse(origin)
         if o.hostname not in LOCAL_HOSTS or (o.port and str(o.port) != str(request.url.port)):
             return PlainTextResponse("forbidden", status_code=403)
+    if request.url.path.startswith("/api/") and not secrets.compare_digest(
+            request.headers.get("x-token", ""), TOKEN):
+        return PlainTextResponse("forbidden: bad token", status_code=403)
     return await call_next(request)
 
 
@@ -38,14 +52,25 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 
 class CheckRequest(BaseModel):
     code: str = Field(max_length=200_000)
-    language: str | None = None
-    stdin: str = ""
+    language: Lang | None = None
+    stdin: str = Field("", max_length=100_000)
     run: bool = True
     timeout: int = Field(5, ge=1, le=60)
-    sandbox: str = "local"
-    ai: str = "auto"
-    explain_lang: str = "简体中文"
+    sandbox: Sandbox = "local"
+    ai: AIBackend = "auto"
+    explain_lang: str = Field("简体中文", max_length=20)
     workdir: str | None = None
+
+
+class _slot:
+    """限制同时运行的检查数量；等太久就提示稍后再试。"""
+    def __enter__(self):
+        if not RUN_SLOTS.acquire(timeout=120):
+            from fastapi import HTTPException
+            raise HTTPException(429, "同时进行的检查太多了，请稍后再试")
+
+    def __exit__(self, *exc):
+        RUN_SLOTS.release()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -93,9 +118,9 @@ def update_apply():
 
 class GenTestsRequest(BaseModel):
     code: str = Field(max_length=200_000)
-    language: str | None = None
-    ai: str = "auto"
-    explain_lang: str = "简体中文"
+    language: Lang | None = None
+    ai: AIBackend = "auto"
+    explain_lang: str = Field("简体中文", max_length=20)
 
 
 @app.post("/api/tests/generate")
@@ -108,25 +133,27 @@ def tests_generate(req: GenTestsRequest):
 
 class RunTestsRequest(BaseModel):
     code: str = Field(max_length=200_000)
-    language: str | None = None
-    tests: list[dict]
+    language: Lang | None = None
+    tests: list[dict] = Field(max_length=30)
     timeout: int = Field(5, ge=1, le=60)
-    sandbox: str = "local"
+    sandbox: Sandbox = "local"
 
 
 @app.post("/api/tests/run")
 def tests_run(req: RunTestsRequest):
     try:
-        return testgen.run(req.code, req.tests, req.language or None, req.timeout, req.sandbox)
+        with _slot():
+            return testgen.run(req.code, req.tests, req.language or None, req.timeout, req.sandbox)
     except Exception as e:
         return {"error": str(e)}
 
 
 @app.post("/api/check")
 def check(req: CheckRequest):
-    return check_code(req.code, None, req.language or None, req.stdin, req.run, req.timeout,
-                      sandbox=req.sandbox, ai_backend=req.ai, explain_lang=req.explain_lang,
-                      workdir=req.workdir)
+    with _slot():
+        return check_code(req.code, None, req.language or None, req.stdin, req.run, req.timeout,
+                          sandbox=req.sandbox, ai_backend=req.ai, explain_lang=req.explain_lang,
+                          workdir=req.workdir)
 
 
 # ---------- 文件和文件夹 ----------
@@ -204,8 +231,8 @@ def fs_ai_plan(req: PathRequest):
 class AIReviewRequest(BaseModel):
     path: str
     exclude: list[str] | None = None
-    ai: str = "auto"
-    explain_lang: str = "简体中文"
+    ai: AIBackend = "auto"
+    explain_lang: str = Field("简体中文", max_length=20)
 
 
 @app.post("/api/fs/ai_review")

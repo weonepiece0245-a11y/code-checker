@@ -1,4 +1,5 @@
 """支持的编程语言（被检查的代码是用什么语言写的）。"""
+import re
 from dataclasses import dataclass
 
 
@@ -20,14 +21,34 @@ LANGUAGES = {
 _SUFFIX = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript"}
 
 
+_JS = [r"^\s*(const|let|var)\s+[\w${}\[\], ]+\s*=", r"\bfunction\b\s*[\w$]*\s*\(", r"=>", r"console\.\w+\(",
+       r"===|!==", r";\s*$", r"\brequire\(", r"^\s*export\s", r"^\s*import\s.+\sfrom\s+['\"]",
+       r"^\s*import\s+['\"]", r"^\s*}\s*(else\b.*)?$", r"\{\s*$", r"\bnew\s+[A-Z]\w*\(", r"//"]
+_PY = [r"^\s*def\s+\w+\s*\(.*\)\s*(->.*)?:\s*(#.*)?$", r"^\s*(if|elif|else|for|while|try|except|finally|with|class)\b.*:\s*(#.*)?$",
+       r"^\s*import\s+[\w.]+(\s+as\s+\w+)?\s*$", r"^\s*from\s+[\w.]+\s+import\s", r"\bself\.", r"\bNone\b|\bTrue\b|\bFalse\b",
+       r"^\s*print\(", r"^\s*#", r"\belif\b", r"\blambda\b", r"f\"|f'"]
+_JS_RE = [re.compile(p, re.M) for p in _JS]
+_PY_RE = [re.compile(p, re.M) for p in _PY]
+
+
+def _score(code: str, patterns) -> int:
+    return sum(len(p.findall(code)) for p in patterns)
+
+
 def detect(filename: str | None, code: str) -> Language:
-    """先看文件后缀，没有后缀就根据代码内容猜。"""
+    """先看文件后缀；没有后缀就看代码能不能被 Python 编译，再结合两种语言的特征来判断。"""
     if filename:
         for suf, key in _SUFFIX.items():
-            if filename.endswith(suf):
+            if filename.lower().endswith(suf):
                 return LANGUAGES[key]
-    js_hints = ("console.log", "function ", "const ", "let ", "=>", "require(")
-    py_hints = ("def ", "print(", "import ", "elif ", "self.")
-    js = sum(h in code for h in js_hints)
-    py = sum(h in code for h in py_hints)
+    try:
+        compile(code, "<detect>", "exec")  # 只编译，不运行
+        py_ok = True
+    except (SyntaxError, ValueError):
+        py_ok = False
+    js, py = _score(code, _JS_RE), _score(code, _PY_RE)
+    if py_ok and js <= py:
+        return LANGUAGES["python"]
+    if not py_ok and js > 0:
+        return LANGUAGES["javascript"]
     return LANGUAGES["javascript" if js > py else "python"]

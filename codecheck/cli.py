@@ -22,6 +22,25 @@ def color(s, c):
     return f"{C[c]}{s}{C['end']}" if sys.stdout.isatty() else s
 
 
+def read_text(path: str) -> str:
+    """读取代码文件：找不到时给出清楚的提示；中文 Windows 上的 GBK 文件也能读。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        sys.exit(f"找不到文件：{path}")
+    except IsADirectoryError:
+        sys.exit(f"这是一个文件夹，不是文件：{path}")
+    except PermissionError:
+        sys.exit(f"没有权限读取：{path}")
+    for enc in ("utf-8-sig", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def indent_tail(text, max_lines=30):
     lines = text.rstrip().splitlines()
     if len(lines) > max_lines:
@@ -73,8 +92,8 @@ def main(argv=None):
                 print(color("AI 审查失败：" + str(e), "yellow"))
         return 1 if r["with_errors"] else 0
 
-    code = sys.stdin.read() if a.file == "-" else open(a.file, encoding="utf-8").read()
-    stdin = open(a.input_file, encoding="utf-8").read() if a.input_file else a.input.replace("\\n", "\n")
+    code = sys.stdin.read() if a.file == "-" else read_text(a.file)
+    stdin = read_text(a.input_file) if a.input_file else a.input.replace("\\n", "\n")
     if not a.json and a.ai != "none":
         print(color("正在检查并请 AI 分析，可能需要几十秒……", "dim"), file=sys.stderr)
     r = check_code(code, None if a.file == "-" else a.file, a.lang, stdin, not a.no_run,

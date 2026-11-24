@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>代码检查助手</title>
 <link rel="icon" href="/static/app.png">
+<script>
+// 本次启动的令牌：所有 /api 请求都自动带上（别的网页拿不到它，无法调用本机服务）
+(() => {
+  const TOKEN = "{{TOKEN}}", raw = window.fetch.bind(window);
+  window.fetch = (url, opts = {}) => {
+    if (typeof url === "string" && url.startsWith("/api/")) {
+      opts = {...opts, headers: {...(opts.headers || {}), "X-Token": TOKEN}};
+    }
+    return raw(url, opts);
+  };
+})();
+</script>
 <script src="/static/marked.min.js"></script>
 <script src="/static/purify.min.js"></script>
 <style>

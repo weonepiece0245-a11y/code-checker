@@ -116,7 +116,7 @@ def generate(code: str, language: str | None = None, explain_lang: str = "简体
     lang = LANGUAGES[language] if language else detect(None, code)
     numbered = "\n".join(f"{i + 1:>4} | {ln}" for i, ln in enumerate(code.splitlines()))
     system = SYSTEM.format(language=lang.name, print_fn=PRINT_FN[lang.key], explain_lang=explain_lang)
-    used, data = ai.structured(system, f"代码（带行号，行号不是代码的一部分）：\n```\n{numbered}\n```",
+    used, data = ai.structured(system, f"代码（带行号，行号不是代码的一部分）：\n{ai.fence(numbered)}",
                                SCHEMA, backend)
     data["language"] = lang.key
     data["ai_backend"] = used

@@ -90,6 +90,21 @@ def _zh(code: str, message: str) -> str:
     return f"{ZH[code]}（{message}）" if code in ZH else message
 
 
+def _ruff_json(r: subprocess.CompletedProcess) -> list:
+    """解析 ruff 的输出。ruff 没装好、崩溃时不能当成“没有问题”，要明确报错。"""
+    out = (r.stdout or "").strip()
+    if r.returncode not in (0, 1) or not out.startswith("["):
+        detail = (r.stderr or out or "").strip().splitlines()
+        hint = detail[-1][:200] if detail else f"退出码 {r.returncode}"
+        if "No module named ruff" in (r.stderr or ""):
+            raise RuntimeError("没有安装 ruff，跳过了深度检查（可以运行 pip install ruff 安装）")
+        raise RuntimeError(f"ruff 运行失败，跳过了深度检查（{hint}）")
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        raise RuntimeError("ruff 的输出无法解析，跳过了深度检查") from None
+
+
 def ruff_text(text: str, filename: str, include_syntax: bool = True) -> list[Issue]:
     """检查一段文本（用于 GBK 等非 UTF-8 文件：先按正确编码解码，再交给 ruff）。"""
     try:
@@ -99,9 +114,11 @@ def ruff_text(text: str, filename: str, include_syntax: bool = True) -> list[Iss
                                                "--stdin-filename", filename, "-"],
                            input=text, capture_output=True, text=True, timeout=60,
                            encoding="utf-8", errors="replace")
-        items = json.loads(r.stdout or "[]")
-    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
-        return []
+        items = _ruff_json(r)
+    except FileNotFoundError:
+        raise RuntimeError("没有找到 ruff，跳过了深度检查（可以运行 pip install ruff 安装）") from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ruff 检查超时，跳过了深度检查") from None
     return [i for i in (_to_issue(item, include_syntax) for item in items) if i]
 
 
@@ -128,9 +145,11 @@ def ruff_many(paths: list[str], include_syntax: bool = True) -> dict[str, list[I
                                args=_ruff_cmd() + ["check", "--isolated", "--select", RUFF_RULES,
                                                    "--output-format", "json", "--no-cache", *batch],
                                capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
-            items = json.loads(r.stdout or "[]")
-        except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
-            raise RuntimeError("没有找到 ruff，跳过深度检查（pip install ruff）") from None
+            items = _ruff_json(r)
+        except FileNotFoundError:
+            raise RuntimeError("没有找到 ruff，跳过了深度检查（可以运行 pip install ruff 安装）") from None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("ruff 检查超时，跳过了深度检查") from None
         for item in items:
             key = norm.get(os.path.normcase(os.path.abspath(item["filename"])), item["filename"])
             if item.get("code") == "E902":  # 不是 UTF-8（多半是 GBK），换个编码再查

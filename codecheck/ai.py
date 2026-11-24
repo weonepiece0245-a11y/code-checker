@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -40,9 +41,16 @@ SYSTEM_PROMPT = """你是一位耐心、严谨的编程老师和代码审查员�
 """
 
 
+def fence(text: str, lang: str = "") -> str:
+    """用比内容里最长的连续反引号还长的围栏包起来，内容里有 ``` 也不会提前结束。"""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    f = "`" * max(3, longest + 1)
+    return f"{f}{lang}\n{text}\n{f}"
+
+
 def _build_user_message(language_name: str, code: str, issues: list, run: dict | None, stdin: str) -> str:
     numbered = "\n".join(f"{i + 1:>4} | {ln}" for i, ln in enumerate(code.splitlines()))
-    parts = [f"编程语言：{language_name}", f"代码（带行号）：\n```\n{numbered}\n```"]
+    parts = [f"编程语言：{language_name}", f"代码（带行号）：\n{fence(numbered)}"]
     if issues:
         parts.append("静态检查发现：\n" + "\n".join(
             f"- 第 {i['line']} 行 [{i['code']}] {i['message']}" for i in issues))
@@ -52,9 +60,9 @@ def _build_user_message(language_name: str, code: str, issues: list, run: dict |
         parts.append(
             f"运行结果：退出码 {run['exit_code']}，耗时 {run['duration_ms']}ms"
             + ("，超时" if run["timed_out"] else "") + (f"，备注：{run['note']}" if run.get("note") else "")
-            + (f"\n标准输入：\n```\n{stdin}\n```" if stdin else "")
-            + f"\n标准输出：\n```\n{run['stdout'] or '（空）'}\n```"
-            + f"\n错误输出：\n```\n{run['stderr'] or '（空）'}\n```")
+            + (f"\n标准输入：\n{fence(stdin)}" if stdin else "")
+            + f"\n标准输出：\n{fence(run['stdout'] or '（空）')}"
+            + f"\n错误输出：\n{fence(run['stderr'] or '（空）')}")
     else:
         parts.append("运行结果：未运行")
     return "\n\n".join(parts)
