@@ -9,9 +9,19 @@
 // 本次启动的令牌：所有 /api 请求都自动带上（别的网页拿不到它，无法调用本机服务）
 (() => {
   const TOKEN = "{{TOKEN}}", raw = window.fetch.bind(window);
+  let inflight = 0;
+  const notify = () => {
+    if (window.parent === window) return;
+    try { window.parent.postMessage({type: "busy", busy: inflight > 0}, location.origin); } catch {}
+  };
   window.fetch = (url, opts = {}) => {
     if (typeof url === "string" && url.startsWith("/api/")) {
       opts = {...opts, headers: {...(opts.headers || {}), "X-Token": TOKEN}};
+      // 检查、测试、AI 这些耗时操作算“忙碌”；心跳、保存设置、更新不算
+      if ((opts.method || "GET") === "POST" && !/^\/api\/(ping|fs\/exclude|fs\/pick|update)/.test(url)) {
+        inflight++; notify();
+        return raw(url, opts).finally(() => { inflight--; notify(); });
+      }
     }
     return raw(url, opts);
   };
@@ -110,6 +120,32 @@ button.ai{background:linear-gradient(90deg,#2563eb,#7c3aed)}
 .st.not_fixed{color:var(--err);border:1px solid var(--err)} .st.unclear{color:var(--muted);border:1px solid var(--line)}
 .rv.fixed{border-left-color:var(--ok);opacity:.85}
 pre.runout{max-height:320px;overflow:auto}
+/* 放进标签页时，标题栏和更新提示由外壳负责 */
+body.embedded header, body.embedded #updbar{display:none !important}
+/* 右侧分类标签 */
+.vtabs{display:flex;gap:4px;flex-wrap:wrap;position:sticky;top:0;z-index:5;background:var(--bg);padding:2px 0 6px}
+.vtabs button{background:var(--panel);color:var(--muted);border:1px solid var(--line);border-radius:8px;
+  padding:6px 12px;font-size:13.5px;display:inline-flex;align-items:center;gap:6px}
+.vtabs button.on{color:var(--text);border-color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent);font-weight:600}
+.vtabs button:disabled{opacity:.45;cursor:default}
+.vb{font-size:11.5px;font-weight:600;border-radius:99px;padding:0 6px;line-height:18px}
+.vb.ok{color:var(--ok);border:1px solid var(--ok)} .vb.bad{color:var(--err);border:1px solid var(--err)}
+.vb.warn{color:var(--warn);border:1px solid var(--warn)} .vb.new{color:#fff;background:var(--accent)}
+.vb.spin{width:12px;height:12px;padding:0;border:2px solid var(--line);border-top-color:var(--accent);animation:s 1s linear infinite}
+.view[hidden]{display:none}
+/* AI 讲解按小节折叠 */
+.ai details.sec{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:4px 12px}
+.ai details.sec>summary{cursor:pointer;font-weight:600;font-size:15px;padding:4px 0;list-style:none}
+.ai details.sec>summary::-webkit-details-marker{display:none}
+.ai details.sec>summary::before{content:"▸ ";color:var(--muted)} .ai details.sec[open]>summary::before{content:"▾ "}
+/* 汇总小卡片和筛选 */
+.stats{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 10px}
+.stat{border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:13px;background:var(--code)}
+.stat b{font-size:16px;margin-right:2px}
+.filters{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
+.filters button{background:var(--panel);color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:3px 12px;font-size:13px}
+.filters button.on{color:var(--text);border-color:var(--accent);font-weight:600}
+.rv details summary{cursor:pointer}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -152,10 +188,18 @@ pre.runout{max-height:320px;overflow:auto}
     <div class="muted" id="aiinfo" style="font-size:12px"></div>
   </section>
   <div class="col">
-    <section class="panel" id="folderout" style="display:none"></section>
-    <section class="panel" id="folderai" style="display:none"></section>
-    <section class="panel" id="out"><p class="muted">结果会显示在这里。</p></section>
-    <section class="panel" id="testsout" style="display:none"></section>
+    <nav class="vtabs" id="vtabs">
+      <button data-view="out" class="on">检查结果<span class="vb" id="vb-out"></span></button>
+      <button data-view="aiout">AI 讲解<span class="vb" id="vb-aiout"></span></button>
+      <button data-view="testsout">测试<span class="vb" id="vb-testsout"></span></button>
+      <button data-view="folderout">文件夹<span class="vb" id="vb-folderout"></span></button>
+      <button data-view="folderai">AI 审查<span class="vb" id="vb-folderai"></span></button>
+    </nav>
+    <section class="panel view" id="out"><p class="muted">点左边的“检查”，结果会显示在这里。</p></section>
+    <section class="panel view" id="aiout" hidden><p class="muted">点“检查”时（AI 选“自动”），AI 会在这里讲解错误、给出修好的代码。</p></section>
+    <section class="panel view" id="testsout" hidden><p class="muted">点左边的“AI 生成测试”，AI 会设计测试并逐个运行，结果显示在这里。</p></section>
+    <section class="panel view" id="folderout" hidden><p class="muted">点左上角的“📁 检查文件夹”，选一个文件夹，这里会列出每个文件的问题。</p></section>
+    <section class="panel view" id="folderai" hidden><p class="muted">先检查一个文件夹，再点“🤖 AI 审查整个文件夹”，报告会显示在这里。</p></section>
   </div>
 </main>
 <script>
@@ -192,6 +236,33 @@ console.log(oldest(users));
 `},
 };
 const $ = id => document.getElementById(id);
+const EMBEDDED = window.parent !== window;
+if (EMBEDDED) document.body.classList.add("embedded");
+
+// 右侧分类标签：一次只显示一类结果
+const VIEWS = ["out", "aiout", "testsout", "folderout", "folderai"];
+function showView(name) {
+  VIEWS.forEach(v => { $(v).hidden = v !== name; });
+  document.querySelectorAll("#vtabs button").forEach(b => b.classList.toggle("on", b.dataset.view === name));
+  if ($("vb-" + name).classList.contains("new")) setBadge(name, "");
+}
+function setBadge(name, kind, text) {
+  const el = $("vb-" + name);
+  el.className = "vb" + (kind ? " " + kind : "");
+  el.textContent = kind === "spin" ? "" : (text || "");
+}
+function markNew(name) {  // 有新内容但不在当前标签：提示一下
+  if ($(name).hidden && !$("vb-" + name).textContent) setBadge(name, "new", "新");
+}
+document.querySelectorAll("#vtabs button").forEach(b => b.onclick = () => showView(b.dataset.view));
+
+// 告诉外壳：标签页标题、有没有未保存的修改
+function report() {
+  if (!EMBEDDED) return;
+  const folderName = lastFolder ? lastFolder.replace(/[\\/]+$/, "").split(/[\\/]/).pop() : "";
+  const title = curFile ? curFile.name : (folderName ? "📁 " + folderName : "");
+  try { window.parent.postMessage({type: "state", title, dirty: !!isDirty()}, location.origin); } catch {}
+}
 for (const k of Object.keys(SAMPLES)) $("sample").add(new Option(k, k));
 $("sample").onchange = e => { const s = SAMPLES[e.target.value]; if (!s) return;
   $("code").value = s.code; $("lang").value = s.lang; $("stdin").value = s.stdin || ""; };
@@ -212,10 +283,11 @@ let lastFolder = null;
 const dirOf = p => p.replace(/[\\/][^\\/]*$/, "");
 function isDirty() { return curFile && $("code").value !== curFile.saved; }
 function showFile() {
-  if (!curFile) { $("filename").textContent = "没有打开文件（也可以直接粘贴代码）"; $("savefile").disabled = true; return; }
+  if (!curFile) { $("filename").textContent = "没有打开文件（也可以直接粘贴代码）"; $("savefile").disabled = true; report(); return; }
   $("filename").innerHTML = `<b>${esc(curFile.name)}</b>${isDirty() ? ' <span style="color:var(--warn)">● 未保存</span>' : ""}<br>${esc(curFile.path)}`;
   $("savefile").disabled = !isDirty();
   document.title = (isDirty() ? "● " : "") + curFile.name + " - 代码检查助手";
+  report();
 }
 function toast(msg, bad) {
   $("toast").style.color = bad ? "var(--err)" : "var(--ok)";
@@ -242,7 +314,11 @@ async function openFile(path, line) {
       curFile = {path: f.path, name: f.name, encoding: f.encoding, crlf: f.crlf, saved: f.content};
       $("stdin").value = "";
       $("out").innerHTML = '<p class="muted">已打开文件，点“检查”开始。</p>';
-      $("testsout").style.display = "none"; lastTests = null;
+      $("aiout").innerHTML = '<p class="muted">点“检查”后，AI 讲解会显示在这里。</p>';
+      $("testsout").innerHTML = '<p class="muted">点“AI 生成测试”，结果会显示在这里。</p>';
+      ["out", "aiout", "testsout"].forEach(v => setBadge(v, ""));
+      lastTests = null;
+      showView("out");
     }
     showFile();
     if (line) gotoLine(line);
@@ -279,8 +355,14 @@ $("openfile").onclick = () => openFile();
 $("savefile").onclick = saveFile;
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveFile(); }
+  if (EMBEDDED && (e.ctrlKey || e.metaKey)) {  // 标签页快捷键交给外壳处理
+    const k = e.key.toLowerCase();
+    const key = k === "t" ? "newtab" : k === "w" ? "close" : k === "tab" ? (e.shiftKey ? "prev" : "next")
+      : k === "pagedown" ? "next" : k === "pageup" ? "prev" : null;
+    if (key) { e.preventDefault(); window.parent.postMessage({type: "key", key}, location.origin); }
+  }
 });
-window.addEventListener("beforeunload", e => { if (isDirty()) { e.preventDefault(); e.returnValue = ""; } });
+if (!EMBEDDED) window.addEventListener("beforeunload", e => { if (isDirty()) { e.preventDefault(); e.returnValue = ""; } });
 
 // ---------- 检查文件夹 ----------
 let dirsOpen = false;  // 记住“各文件夹的文件数”是否展开
@@ -297,13 +379,17 @@ async function scanFolder(path, quiet) {
       path = p.path;
     }
     lastFolder = path;
-    box.style.display = "";
-    if (!quiet) box.innerHTML = '<p><span class="spinner"></span> 正在检查文件夹里的所有代码文件…</p>';
+    report();
+    if (!quiet) {
+      showView("folderout");
+      box.innerHTML = '<p><span class="spinner"></span> 正在检查文件夹里的所有代码文件…</p>';
+    }
+    setBadge("folderout", "spin");
     const r = await post("/api/fs/scan", {path});
     if (r.error) throw new Error(r.error);
     renderFolder(r);
   } catch (e) {
-    box.style.display = "";
+    showView("folderout"); setBadge("folderout", "bad", "!");
     box.innerHTML = '<p style="color:var(--err)">检查文件夹失败：' + esc(e.message) + '</p>';
   }
 }
@@ -312,9 +398,15 @@ function renderFolder(r) {
   const box = $("folderout");
   const ok = r.files.filter(f => !f.issues.length);
   const bad = r.files.filter(f => f.issues.length);
-  let h = `<h2>📁 文件夹检查 <span class="badge ${r.with_errors ? "bad" : "ok"}">${r.with_errors ? r.with_errors + " 个文件有错误" : "没有错误"}</span></h2>`;
-  h += `<p class="muted" style="margin:0 0 6px;overflow-wrap:anywhere">${esc(r.folder)}<br>共 ${r.total} 个代码文件`
-     + (r.with_warnings ? `，${r.with_warnings} 个只有警告` : "") + `。只做了静态检查，没有运行这些文件。点问题可以打开文件并跳到那一行。</p>`;
+  setBadge("folderout", r.with_errors ? "bad" : (r.with_warnings ? "warn" : "ok"),
+           r.with_errors ? String(r.with_errors) : (r.with_warnings ? String(r.with_warnings) : "✓"));
+  let h = `<h2>📁 ${esc(r.folder.replace(/[\\/]+$/, "").split(/[\\/]/).pop())}</h2>
+    <div class="muted" style="font-size:12.5px;overflow-wrap:anywhere;margin:-4px 0 6px">${esc(r.folder)}</div>
+    <div class="stats"><span class="stat"><b>${r.total}</b> 个文件</span>
+      <span class="stat" style="color:${r.with_errors ? "var(--err)" : "var(--ok)"}"><b>${r.with_errors}</b> 个有错误</span>
+      <span class="stat" style="color:var(--warn)"><b>${r.with_warnings}</b> 个只有警告</span>
+      <span class="stat" style="color:var(--ok)"><b>${r.total - r.with_errors - r.with_warnings}</b> 个没问题</span></div>
+    <p class="muted" style="font-size:12.5px;margin:0 0 6px">只检查代码写法，不运行文件。点问题可以打开文件并跳到那一行。</p>`;
   if (r.truncated) h += `<p style="color:var(--warn);font-size:13px">文件太多，只检查了前 500 个。可以在下面排除一些文件夹。</p>`;
   const sk = r.skipped || {}, auto = [];
   if ((sk.browser_profiles || []).length) auto.push(`浏览器配置文件夹 ${sk.browser_profiles.length} 个`);
@@ -373,7 +465,12 @@ function renderFolder(r) {
     openFile(el.dataset.open, el.dataset.line ? +el.dataset.line : 0);
   });
   $("rescan").onclick = () => scanFolder(lastFolder);
-  $("closefolder").onclick = () => { box.style.display = "none"; $("folderai").style.display = "none"; lastFolder = null; };
+  $("closefolder").onclick = () => {
+    box.innerHTML = '<p class="muted">点左上角的“📁 检查文件夹”，选一个文件夹，这里会列出每个文件的问题。</p>';
+    $("folderai").innerHTML = '<p class="muted">先检查一个文件夹，再点“🤖 AI 审查整个文件夹”，报告会显示在这里。</p>';
+    setBadge("folderout", ""); setBadge("folderai", "");
+    lastFolder = null; report(); showView("out");
+  };
   if ($("dirsbox")) $("dirsbox").ontoggle = e => dirsOpen = e.target.open;
   box.querySelectorAll("[data-ex]").forEach(el => el.onclick = async () => {
     await setExclude(r.folder, [...(r.exclude || []), el.dataset.ex]); scanFolder(r.folder, true);
@@ -401,97 +498,108 @@ async function aiReview(mode) {
       + `AI 将阅读 ${plan.files} 个文件（约 ${words} 个字符），大约需要 1~3 分钟，会使用你的 Claude 额度。`;
     if (plan.skipped.length) msg += `\n\n文件比较多，有 ${plan.skipped.length} 个文件超出一次能审查的篇幅，这次不会审查（有错误的文件会优先审查）。\n如果里面有不需要审查的文件夹，可以先在报告里点“排除”。`;
     if (!confirm(msg + "\n\n确定开始吗？")) return;
-    box.style.display = "";
-    box.innerHTML = `<p><span class="spinner"></span> AI 正在${recheck ? "复查" : "阅读"} ${plan.files} 个文件，大约需要 1~3 分钟…</p>`;
-    box.scrollIntoView({behavior: "smooth", block: "start"});
+    showView("folderai"); setBadge("folderai", "spin");
+    box.innerHTML = `<p><span class="spinner"></span> AI 正在${recheck ? "复查" : "阅读"} ${plan.files} 个文件，大约需要 1~3 分钟…</p>
+      <p class="muted" style="font-size:13px">等待的时候可以切到别的标签页做其他检查。</p>`;
     document.querySelectorAll("[data-mode]").forEach(b => b.disabled = true);
     const ai = $("ai").value === "none" ? "auto" : $("ai").value;
     const d = await post(recheck ? "/api/fs/ai_recheck" : "/api/fs/ai_review", {path, ai, explain_lang: $("explain").value});
     if (d.error) throw new Error(d.error);
     recheck ? renderRecheck(d) : renderReview(d);
+    markNew("folderai");
     scanFolder(path, true);  // 刷新按钮上的“还有几个问题”
   } catch (e) {
-    box.style.display = "";
+    setBadge("folderai", "bad", "!");
     box.innerHTML = '<p style="color:var(--err)">AI ' + (recheck ? "复查" : "审查") + '失败：' + esc(e.message) + '</p>';
   } finally { document.querySelectorAll("[data-mode]").forEach(b => b.disabled = false); }
 }
 const STATUS = {fixed: "✅ 已解决", partial: "⚠️ 部分解决", not_fixed: "❌ 未解决", unclear: "❔ 无法判断"};
 function issueCard(i, k, extra) {
   const where = esc(i.file) + (i.line ? ` 第 ${i.line} 行` : "");
-  return `<div class="rv ${extra || i.severity}">
+  return `<div class="rv ${extra || i.severity}" data-sev="${i.severity}">
     <div class="t">${k}. ${esc(i.title)}</div>
     <div class="meta">${SEV[i.severity] || ""} · <span class="tag">${CAT[i.category] || i.category}</span> ·
       ${i.path ? `<a data-open="${esc(i.path)}" data-line="${i.line || 0}">📄 ${where}</a>` : where}</div>
     <div class="txt">${esc(i.explanation)}</div>
-    <div class="lbl">怎么改</div><div class="txt">${esc(i.suggestion)}</div>
+    <details><summary class="lbl">💡 怎么改（点开）</summary><div class="txt">${esc(i.suggestion)}</div></details>
   </div>`;
+}
+// 按严重程度筛选（审查和复查报告共用）
+function addFilters(box, html) {
+  box.innerHTML = html;
+  const cards = [...box.querySelectorAll(".rv[data-sev]")];
+  box.querySelectorAll(".filters button").forEach(b => b.onclick = () => {
+    box.querySelectorAll(".filters button").forEach(x => x.classList.toggle("on", x === b));
+    cards.forEach(c => c.hidden = b.dataset.f !== "all" && c.dataset.sev !== b.dataset.f);
+  });
+  box.querySelectorAll("[data-open]").forEach(el => el.onclick = e => {
+    e.preventDefault(); openFile(el.dataset.open, +el.dataset.line || 0);
+  });
+}
+function filterBar(list) {
+  const n = s => list.filter(i => i.severity === s).length;
+  return `<div class="filters"><button class="on" data-f="all">全部 ${list.length}</button>
+    <button data-f="high">🔴 严重 ${n("high")}</button><button data-f="medium">🟠 中等 ${n("medium")}</button>
+    <button data-f="low">🟡 轻微 ${n("low")}</button></div>`;
 }
 function renderRecheck(d) {
   const box = $("folderai"), c = d.counts, total = d.previous.length;
   const allFixed = c.fixed === total && !d.new_issues.length;
-  let h = `<h2>🤖 AI 复查报告 <span class="badge ${allFixed ? "ok" : "bad"}">${c.fixed} / ${total} 已解决</span></h2>
+  const open = c.partial + c.not_fixed + c.unclear + d.new_issues.length;
+  setBadge("folderai", allFixed ? "ok" : "bad", allFixed ? "✓" : String(open));
+  let h = `<h2>🤖 AI 复查报告</h2>
     <div class="bar"><i style="width:${total ? Math.round(c.fixed / total * 100) : 0}%"></i></div>
-    <p class="muted" style="font-size:13px;margin:0 0 6px">对比的是上次 AI 审查（${esc(d.last_time)}）：
-      ✅ 已解决 ${c.fixed} · ⚠️ 部分解决 ${c.partial} · ❌ 未解决 ${c.not_fixed}${c.unclear ? ` · ❔ 无法判断 ${c.unclear}` : ""}
-      · 🆕 新问题 ${d.new_issues.length}</p>
+    <div class="stats"><span class="stat" style="color:var(--ok)"><b>${c.fixed}</b> 已解决</span>
+      <span class="stat" style="color:#ea580c"><b>${c.partial}</b> 部分解决</span>
+      <span class="stat" style="color:var(--err)"><b>${c.not_fixed}</b> 未解决</span>
+      ${c.unclear ? `<span class="stat"><b>${c.unclear}</b> 无法判断</span>` : ""}
+      <span class="stat" style="color:var(--accent)"><b>${d.new_issues.length}</b> 新问题</span></div>
+    <p class="muted" style="font-size:12.5px;margin:0 0 4px">对比的是上次 AI 审查（${esc(d.last_time)}）</p>
     <p style="margin:0 0 8px">${esc(d.overview)}</p>`;
   if (allFixed) h += `<p style="color:var(--ok);font-weight:600">🎉 上次的问题都解决了，也没有发现新问题！</p>`;
-  const order = {not_fixed: 0, partial: 1, unclear: 2, fixed: 3};
-  const prev = d.previous.map((i, k) => ({...i, k: k + 1})).sort((a, b) => order[a.status] - order[b.status]);
-  h += `<h2>上次的问题</h2>`;
-  prev.forEach(i => {
+  const card = i => {
     const where = esc(i.file) + (i.line ? ` 第 ${i.line} 行` : "");
-    h += `<div class="rv ${i.status === "fixed" ? "fixed" : i.severity}">
+    return `<div class="rv ${i.status === "fixed" ? "fixed" : i.severity}" data-sev="${i.severity}">
       <div class="t"><span class="st ${i.status}">${STATUS[i.status]}</span> ${i.k}. ${esc(i.title)}</div>
       <div class="meta">${SEV[i.severity] || ""} · ${i.path ? `<a data-open="${esc(i.path)}" data-line="${i.line || 0}">📄 ${where}</a>` : where}</div>
       <div class="txt">${esc(i.note)}</div>
-      ${i.status !== "fixed" ? `<details><summary class="lbl" style="cursor:pointer">上次的说明和建议</summary>
+      ${i.status !== "fixed" ? `<details><summary class="lbl">💡 上次的说明和改法（点开）</summary>
         <div class="txt">${esc(i.explanation)}</div><div class="lbl">怎么改</div><div class="txt">${esc(i.suggestion)}</div></details>` : ""}
     </div>`;
-  });
-  if (d.new_issues.length) {
-    h += `<h2>🆕 新发现的问题</h2>`;
-    d.new_issues.forEach((i, k) => h += issueCard(i, k + 1));
-  }
+  };
+  const prev = d.previous.map((i, k) => ({...i, k: k + 1}));
+  const order = {not_fixed: 0, partial: 1, unclear: 2};
+  const todo = prev.filter(i => i.status !== "fixed").sort((a, b) => order[a.status] - order[b.status]);
+  const done = prev.filter(i => i.status === "fixed");
+  if (todo.length) h += `<h2>还要处理（${todo.length}）</h2>` + todo.map(card).join("");
+  if (d.new_issues.length) h += `<h2>🆕 新发现的问题（${d.new_issues.length}）</h2>` + d.new_issues.map((i, k) => issueCard(i, k + 1)).join("");
+  if (done.length) h += `<details ${todo.length ? "" : "open"}><summary style="cursor:pointer;font-weight:600;margin:10px 0 4px">✅ 已解决（${done.length}）</summary>${done.map(card).join("")}</details>`;
   if (d.next_steps.length) h += `<h2>👉 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
   h += `<p class="muted" style="font-size:12.5px">没解决的问题和新问题已经记下来了，改完后可以再点“AI 复查”。</p>`;
-  box.innerHTML = h;
-  box.querySelectorAll("[data-open]").forEach(el => el.onclick = e => {
-    e.preventDefault(); openFile(el.dataset.open, +el.dataset.line || 0);
-  });
+  addFilters(box, h);
 }
 function renderReview(d) {
   const box = $("folderai");
   const n = s => d.issues.filter(i => i.severity === s).length;
+  setBadge("folderai", n("high") ? "bad" : (d.issues.length ? "warn" : "ok"), d.issues.length ? String(d.issues.length) : "✓");
   let h = `<h2>🤖 AI 审查报告</h2>
-    <p style="margin:0 0 6px">${esc(d.overview)}</p>
-    <p class="muted" style="font-size:13px;margin:0 0 8px">审查了 ${d.reviewed.length} 个文件
-      ${d.skipped.length ? `，${d.skipped.length} 个因为篇幅限制没有审查` : ""}。
-      发现 ${d.issues.length} 个问题：严重 ${n("high")} · 中等 ${n("medium")} · 轻微 ${n("low")}</p>`;
+    <div class="stats"><span class="stat" style="color:var(--err)"><b>${n("high")}</b> 严重</span>
+      <span class="stat" style="color:#ea580c"><b>${n("medium")}</b> 中等</span>
+      <span class="stat" style="color:var(--warn)"><b>${n("low")}</b> 轻微</span>
+      <span class="stat"><b>${d.reviewed.length}</b> 个文件已审查</span></div>
+    <details open><summary class="muted" style="cursor:pointer;font-size:13px">项目概况</summary><p style="margin:4px 0 8px">${esc(d.overview)}</p></details>`;
   if (!d.issues.length) h += `<p style="color:var(--ok)">✓ AI 没有发现值得报告的问题。</p>`;
-  d.issues.forEach((i, k) => {
-    const where = esc(i.file) + (i.line ? ` 第 ${i.line} 行` : "");
-    h += `<div class="rv ${i.severity}">
-      <div class="t">${k + 1}. ${esc(i.title)}</div>
-      <div class="meta">${SEV[i.severity] || ""} · <span class="tag">${CAT[i.category] || i.category}</span> ·
-        ${i.path ? `<a data-open="${esc(i.path)}" data-line="${i.line || 0}">📄 ${where}</a>` : where}</div>
-      <div class="txt">${esc(i.explanation)}</div>
-      <div class="lbl">怎么改</div><div class="txt">${esc(i.suggestion)}</div>
-    </div>`;
-  });
-  if (d.strengths.length) h += `<h2>👍 写得好的地方</h2><ul>${d.strengths.map(s => `<li>${esc(s)}</li>`).join("")}</ul>`;
+  else h += filterBar(d.issues) + d.issues.map((i, k) => issueCard(i, k + 1)).join("");
   if (d.next_steps.length) h += `<h2>👉 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
+  if (d.strengths.length) h += `<details><summary class="muted" style="cursor:pointer">👍 写得好的地方（${d.strengths.length}）</summary><ul>${d.strengths.map(s => `<li>${esc(s)}</li>`).join("")}</ul></details>`;
   if (d.skipped.length) {
     const groups = d.skipped_groups || [{dir: "", files: d.skipped.length}];
-    h += `<details><summary class="muted" style="cursor:pointer;font-size:13px">因为篇幅限制没有审查的文件（${d.skipped.length} 个，按文件夹统计）</summary>
+    h += `<details><summary class="muted" style="cursor:pointer;font-size:13px">因为篇幅限制没有审查的文件（${d.skipped.length} 个）</summary>
       <div class="muted" style="font-size:12.5px;overflow-wrap:anywhere;margin-top:4px">
       ${groups.map(g => `<div><code>${esc(g.dir)}</code>：${g.files} 个</div>`).join("")}
-      <p style="margin:6px 0 0">想审查这些文件：在上面的文件夹报告里排除不需要的文件夹，或者直接选择那个子文件夹来审查。</p></div></details>`;
+      <p style="margin:6px 0 0">想审查这些文件：在“文件夹”标签里排除不需要的文件夹，或者直接选择那个子文件夹来审查。</p></div></details>`;
   }
-  box.innerHTML = h;
-  box.querySelectorAll("[data-open]").forEach(el => el.onclick = e => {
-    e.preventDefault(); openFile(el.dataset.open, +el.dataset.line || 0);
-  });
+  addFilters(box, h);
 }
 
 // ---------- AI 生成测试 ----------
@@ -502,9 +610,9 @@ async function post(url, body) {
   return r.json();
 }
 function testsBusy(html) {
-  const box = $("testsout"); box.style.display = "";
+  const box = $("testsout");
+  showView("testsout"); setBadge("testsout", "spin");
   box.innerHTML = '<p><span class="spinner"></span> ' + html + '</p>';
-  box.scrollIntoView({behavior: "smooth", block: "start"});
 }
 async function genTests() {
   const code = $("code").value;
@@ -518,6 +626,7 @@ async function genTests() {
     lastTests = g;
     await runTests();
   } catch (e) {
+    setBadge("testsout", "bad", "!");
     $("testsout").innerHTML = '<p style="color:var(--err)">生成测试失败：' + esc(e.message) + '</p>';
   } finally { $("gentests").disabled = false; }
 }
@@ -530,12 +639,15 @@ async function runTests() {
     if (r.error) throw new Error(r.error);
     renderTests(r);
   } catch (e) {
+    setBadge("testsout", "bad", "!");
     $("testsout").innerHTML = '<p style="color:var(--err)">运行测试失败：' + esc(e.message) + '</p>';
   }
 }
 function renderTests(r) {
   const pct = r.total ? Math.round(r.passed / r.total * 100) : 0;
   const all = r.passed === r.total;
+  setBadge("testsout", all ? "ok" : "bad", `${r.passed}/${r.total}`);
+  markNew("testsout");
   let h = `<h2>测试结果 <span class="badge ${all ? "ok" : "bad"}">${r.passed} / ${r.total} 通过</span></h2>`;
   h += `<div class="bar"><i style="width:${pct}%"></i></div>`;
   h += `<p class="muted" style="margin:0 0 8px">代码的用途：${esc(lastTests.summary)}</p>`;
@@ -598,10 +710,12 @@ $("updbtn").onclick = async () => {
     }, 1500);
   } catch { msg.textContent = "更新失败，请稍后再试"; btn.disabled = false; }
 };
-checkUpdate(false);
-// 心跳：告诉程序窗口还开着（备用窗口模式下，窗口关闭后程序会自动退出）
-const ping = () => fetch("/api/ping", {method: "POST"}).catch(() => {});
-ping(); setInterval(ping, 5000);
+if (!EMBEDDED) {
+  checkUpdate(false);
+  // 心跳：告诉程序窗口还开着（备用窗口模式下，窗口关闭后程序会自动退出）
+  const ping = () => fetch("/api/ping", {method: "POST"}).catch(() => {});
+  ping(); setInterval(ping, 5000);
+}
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
@@ -609,7 +723,10 @@ async function go() {
   const code = $("code").value;
   if (!code.trim()) { $("out").innerHTML = '<p class="muted">请先输入代码。</p>'; return; }
   $("go").disabled = true;
-  $("out").innerHTML = '<p><span class="spinner"></span> 正在检查' + ($("ai").value !== "none" ? "，AI 分析可能需要几十秒…" : "…") + '</p>';
+  const useAI = $("ai").value !== "none";
+  showView("out"); setBadge("out", "spin"); setBadge("aiout", useAI ? "spin" : "");
+  $("out").innerHTML = '<p><span class="spinner"></span> 正在检查' + (useAI ? "，AI 讲解可能需要几十秒…" : "…") + '</p>';
+  if (useAI) $("aiout").innerHTML = '<p><span class="spinner"></span> AI 正在分析，可能需要几十秒…</p>';
   try {
     const r = await fetch("/api/check", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({code, language: $("lang").value || null, stdin: $("stdin").value,
@@ -618,12 +735,22 @@ async function go() {
         workdir: curFile ? dirOf(curFile.path) : null})});
     if (!r.ok) throw new Error("服务器返回 " + r.status + "：" + await r.text());
     render(await r.json());
-  } catch (e) { $("out").innerHTML = '<p style="color:var(--err)">出错了：' + esc(e.message) + '</p>'; }
+  } catch (e) {
+    setBadge("out", "bad", "!"); setBadge("aiout", "");
+    $("out").innerHTML = '<p style="color:var(--err)">出错了：' + esc(e.message) + '</p>';
+  }
   finally { $("go").disabled = false; }
 }
 
 function render(d) {
+  const errs = d.issues.filter(i => i.severity === "error").length, warns = d.issues.length - errs;
+  setBadge("out", d.passed ? "ok" : "bad", d.passed ? "✓" : (errs || (d.run && !d.run.ok) ? "✗" : "!"));
   let h = `<h2>结论 <span class="badge ${d.passed ? "ok" : "bad"}">${d.passed ? "通过" : "有问题"}</span> <span class="muted" style="font-weight:400;font-size:13px">${esc(d.language)}</span></h2>`;
+  h += `<div class="stats"><span class="stat" style="color:${errs ? "var(--err)" : "var(--ok)"}"><b>${errs}</b> 个错误</span>
+    <span class="stat" style="color:var(--warn)"><b>${warns}</b> 个警告</span>
+    ${d.run ? `<span class="stat" style="color:${d.run.ok ? "var(--ok)" : "var(--err)"}">运行：<b style="font-size:14px">${d.run.ok ? "正常" : (d.run.timed_out ? "超时" : "出错")}</b></span>` : ""}</div>`;
+  if (d.ai) h += `<p style="margin:0 0 8px"><button class="ghost" id="seeai">🤖 看 AI 讲解：为什么错、怎么改 →</button></p>`;
+  else if (d.ai_error) h += `<p style="color:var(--warn);font-size:13px">AI 讲解失败：${esc(d.ai_error)}</p>`;
   h += `<h2>静态检查</h2>`;
   h += d.issues.length ? d.issues.map(i => `<div class="issue ${i.severity}"><b>${i.severity === "error" ? "错误" : "警告"}</b> 第 ${i.line} 行 <code>${esc(i.code)}</code> ${esc(i.message)}</div>`).join("") : `<p style="color:var(--ok)">✓ 没有发现问题</p>`;
   if (d.run_error) h += `<h2>运行</h2><p style="color:var(--err)">无法运行：${esc(d.run_error)}</p>`;
@@ -631,17 +758,47 @@ function render(d) {
     const x = d.run;
     h += `<h2>运行结果 <span class="badge ${x.ok ? "ok" : "bad"}">${x.ok ? "正常结束" : (x.timed_out ? "超时" : "退出码 " + x.exit_code)}</span> <span class="muted" style="font-weight:400;font-size:13px">${x.duration_ms}ms · ${x.mode === "docker" ? "Docker" : "本机"}</span></h2>`;
     if (x.note) h += `<p style="color:var(--warn)">${esc(x.note)}</p>`;
+    if (x.stderr) h += `<div class="muted">错误输出</div><pre class="runout" style="color:var(--err)">${esc(x.stderr)}</pre>`;
     const nOut = x.stdout ? x.stdout.split("\n").length : 0;
     h += `<div class="muted">输出${nOut > 15 ? `（共 ${nOut} 行，框里可以滚动）` : ""}</div><pre class="runout">${esc(x.stdout) || "（空）"}</pre>`;
-    if (x.stderr) h += `<div class="muted">错误输出</div><pre class="runout" style="color:var(--err)">${esc(x.stderr)}</pre>`;
   }
+  $("out").innerHTML = h;
+  if ($("seeai")) $("seeai").onclick = () => showView("aiout");
+
   if (d.ai) {
     const md = (window.marked && window.DOMPurify) ? DOMPurify.sanitize(marked.parse(d.ai))
       : `<div style="white-space:pre-wrap">${esc(d.ai)}</div>`;
-    h += `<h2>AI 分析 <span class="muted" style="font-weight:400;font-size:13px">${d.ai_backend === "api" ? "API key" : "Claude Code 订阅"}</span></h2><div class="ai">${md}</div>`;
-  } else if (d.ai_error) h += `<h2>AI 分析</h2><p style="color:var(--warn)">${esc(d.ai_error)}</p>`;
-  $("out").innerHTML = h;
-  addCodeButtons();
+    $("aiout").innerHTML = `<h2>🤖 AI 讲解 <span class="muted" style="font-weight:400;font-size:13px">${d.ai_backend === "api" ? "API key" : "Claude Code 订阅"}</span></h2><div class="ai">${md}</div>`;
+    sectionize($("aiout").querySelector(".ai"));
+    setBadge("aiout", "");
+    markNew("aiout");
+    addCodeButtons();
+  } else {
+    setBadge("aiout", d.ai_error ? "bad" : "", d.ai_error ? "!" : "");
+    $("aiout").innerHTML = d.ai_error ? `<p style="color:var(--warn)">AI 讲解失败：${esc(d.ai_error)}</p>`
+      : '<p class="muted">这次没有使用 AI（AI 选了“不用 AI”）。</p>';
+  }
+}
+
+// 把 AI 讲解按“## 小节”折叠起来：重要的展开，其余收起
+const OPEN_SECTIONS = ["总结", "错误详解", "修改后的完整代码", "Summary", "Errors", "Fixed code", "總結", "錯誤詳解", "修改後的完整程式碼"];
+function sectionize(root) {
+  if (!root || !root.querySelector("h2")) return;
+  const nodes = [...root.childNodes];
+  root.innerHTML = "";
+  let cur = null;
+  nodes.forEach(n => {
+    if (n.nodeName === "H2") {
+      cur = document.createElement("details");
+      cur.className = "sec";
+      const title = n.textContent.trim();
+      cur.open = OPEN_SECTIONS.some(t => title.includes(t));
+      const sum = document.createElement("summary");
+      sum.textContent = title;
+      cur.appendChild(sum);
+      root.appendChild(cur);
+    } else (cur || root).appendChild(n);
+  });
 }
 
 // 给 AI 回答里的代码块加上“复制”和“放回编辑器”按钮
@@ -662,7 +819,7 @@ function addCodeButtons() {
     put.onclick = () => {
       $("code").value = code.replace(/\n$/, "");
       showFile();
-      $("code").scrollIntoView({behavior: "smooth", block: "center"});
+      $("code").scrollIntoView({behavior: "smooth", block: "center"}); $("code").focus();
       put.textContent = "已放回 ✓，可以再点一次检查";
       setTimeout(() => put.textContent = "放回编辑器", 3000);
     };

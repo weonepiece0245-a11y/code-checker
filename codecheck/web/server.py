@@ -19,7 +19,9 @@ from ..core import check_code
 app = FastAPI(title="代码检查助手")
 # 每次启动随机生成的令牌：写进页面，所有 /api 请求都要带上。别的网页拿不到它，就无法调用本机服务
 TOKEN = secrets.token_urlsafe(24)
-PAGE = (Path(__file__).parent / "index.html").read_text(encoding="utf-8").replace("{{TOKEN}}", TOKEN)
+_WEB = Path(__file__).parent
+PAGE = (_WEB / "index.html").read_text(encoding="utf-8").replace("{{TOKEN}}", TOKEN)   # 一个工作区
+SHELL = (_WEB / "shell.html").read_text(encoding="utf-8").replace("{{TOKEN}}", TOKEN)  # 外壳：标签栏 + 多个工作区
 # 同一时间最多运行 2 个检查/测试，避免把电脑占满
 RUN_SLOTS = threading.BoundedSemaphore(2)
 
@@ -75,6 +77,11 @@ class _slot:
 
 @app.get("/", response_class=HTMLResponse)
 def index():
+    return SHELL
+
+
+@app.get("/workspace", response_class=HTMLResponse)
+def workspace():
     return PAGE
 
 
