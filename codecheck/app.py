@@ -18,7 +18,6 @@ import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LAUNCHER = ROOT / "启动网页版.bat"
 ICON = ROOT / "app.ico"
 READY = ROOT / ".app_ready"
 LOG = ROOT / "app.log"
@@ -78,13 +77,10 @@ def _mark_ready():
 
 
 def restart():
-    """一键更新后调用：重新运行启动器（它会完成替换文件、安装组件），然后退出自己。"""
+    """一键更新后调用：用无窗口启动器重新启动（它会完成替换文件、安装组件），然后退出自己。"""
     print("更新完成，重新启动")
-    if sys.platform == "win32" and LAUNCHER.exists():
-        subprocess.Popen(["cmd", "/c", "start", "", str(LAUNCHER)], cwd=ROOT,
-                         creationflags=0x08000000)  # CREATE_NO_WINDOW（只隐藏这个中转的 cmd）
-    else:
-        subprocess.Popen([sys.executable, "-m", "codecheck.app"], cwd=ROOT, start_new_session=True)
+    from .launcher import spawn
+    spawn("codecheck.launcher")
     os._exit(0)
 
 
@@ -169,8 +165,8 @@ def _run_fallback(port: int):
             os._exit(0)
 
 
-def _detach() -> int:
-    """在后台启动窗口；等它真正打开再返回，启动失败就返回 2（启动器会改用网页版）。"""
+def spawn_and_wait(timeout: float = 60) -> tuple[str, str]:
+    """在后台启动窗口，等它真正打开再返回。返回 ("ok" | "failed" | "slow", 日志最后几行)。"""
     pyw = Path(sys.executable).with_name("pythonw.exe")
     exe = str(pyw) if pyw.exists() else sys.executable
     READY.unlink(missing_ok=True)
@@ -178,17 +174,24 @@ def _detach() -> int:
     p = subprocess.Popen([exe, "-m", "codecheck.app"], cwd=ROOT, creationflags=flags,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=sys.platform != "win32")
-    for _ in range(600):  # 最多等 60 秒
+    for _ in range(int(timeout * 10)):
         if READY.exists():
-            return 0
+            return "ok", ""
         if p.poll() is not None:
-            print("窗口启动失败，日志：")
             try:
-                print("\n".join(LOG.read_text(encoding="utf-8").splitlines()[-15:]))
+                tail = "\n".join(LOG.read_text(encoding="utf-8").splitlines()[-15:])
             except OSError:
-                pass
-            return 2
+                tail = "（没有日志）"
+            return "failed", tail
         time.sleep(0.1)
+    return "slow", ""
+
+
+def _detach() -> int:
+    status, tail = spawn_and_wait()
+    if status == "failed":
+        print("窗口启动失败，日志：\n" + tail)
+        return 2
     return 0
 
 

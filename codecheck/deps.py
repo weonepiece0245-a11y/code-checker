@@ -7,25 +7,47 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CORE = ["fastapi", "uvicorn", "anthropic", "ruff", "pydantic"]
 WEBVIEW_FAILED = ROOT / ".webview_failed"
+NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
-def _pip(*args) -> int:
-    return subprocess.call([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *args])
+def _python() -> str:
+    # pythonw 运行 pip 也可以，但用 python.exe 更稳；配合 CREATE_NO_WINDOW 不会弹黑窗口
+    p = Path(sys.executable)
+    if p.name.lower() == "pythonw.exe" and p.with_name("python.exe").exists():
+        return str(p.with_name("python.exe"))
+    return sys.executable
+
+
+def _pip(args: list, quiet: bool) -> tuple[int, str]:
+    cmd = [_python(), "-m", "pip", "install", "--disable-pip-version-check", *args]
+    if not quiet:
+        return subprocess.call(cmd), ""
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       creationflags=NO_WINDOW)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def ensure(progress=print, quiet: bool = False) -> tuple[bool, str]:
+    """返回 (是否成功, 失败时的输出)。progress 用来显示当前在做什么。"""
+    if any(find_spec(m) is None for m in CORE) or not (ROOT / ".deps_ok").exists():
+        progress("正在安装需要的组件，第一次大约 1 分钟……")
+        code, out = _pip(["-r", str(ROOT / "requirements.txt")], quiet)
+        if code != 0:
+            return False, out
+        (ROOT / ".deps_ok").write_text("ok")
+    if find_spec("webview") is None and not WEBVIEW_FAILED.exists():
+        progress("正在安装桌面窗口组件……")
+        code, _ = _pip(["pywebview>=5"], quiet)
+        if code != 0:
+            WEBVIEW_FAILED.write_text("1")  # 不影响使用，下次不再重试
+    return True, ""
 
 
 def main() -> int:
-    if any(find_spec(m) is None for m in CORE) or not (ROOT / ".deps_ok").exists():
-        print("正在安装需要的组件，第一次会慢一点……")
-        if _pip("-r", str(ROOT / "requirements.txt")) != 0:
-            print("安装失败，请把上面的错误信息截图发给 Claude。")
-            return 1
-        (ROOT / ".deps_ok").write_text("ok")
-    if find_spec("webview") is None and not WEBVIEW_FAILED.exists():
-        print("正在安装桌面窗口组件……")
-        if _pip("pywebview>=5") != 0:
-            print("桌面窗口组件安装失败，将改用 Edge 应用窗口（不影响使用）。")
-            WEBVIEW_FAILED.write_text("1")
-    return 0
+    ok, _ = ensure()
+    if not ok:
+        print("安装失败，请把上面的错误信息截图发给 Claude。")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

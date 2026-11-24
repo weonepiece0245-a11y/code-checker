@@ -20,32 +20,31 @@ if errorlevel 1 (
   )
 )
 
-rem 在桌面创建或刷新快捷方式
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create_shortcut.ps1" >nul 2>nul
+rem 加参数 web 用浏览器版；加参数 console 在这个窗口里显示启动过程（排查问题用）
+if /i "%~1"=="web" goto web
+if /i "%~1"=="console" (
+  %PY% -m codecheck.launcher --console
+  pause
+  exit /b
+)
 
-echo 正在检查更新……
+rem 正常情况：交给没有黑色窗口的启动器（pythonw / pyw），这个窗口马上关闭
+start "" %PY%w -m codecheck.launcher
+if errorlevel 1 (
+  echo 无窗口启动失败，改用命令行模式……
+  %PY% -m codecheck.launcher --console
+  pause
+)
+exit /b 0
+
+:web
 %PY% -m codecheck.updater
-if errorlevel 10 (start "" "%~f0" %* & exit /b)
-
+if errorlevel 10 (start "" "%~f0" web & exit /b)
 %PY% -m codecheck.deps
 if errorlevel 1 (
   pause
   exit /b 1
 )
-
-rem 加参数 web 可以用浏览器版：启动网页版.bat web
-if /i "%~1"=="web" goto web
-
-echo 正在打开代码检查助手……
-%PY% -m codecheck.app --detach
-if errorlevel 2 (
-  echo.
-  echo 桌面窗口打不开，改用浏览器打开。请把上面的信息截图发给 Claude。
-  goto web
-)
-exit /b 0
-
-:web
 %PY% -m codecheck.web.server
 if errorlevel 10 (
   echo 正在用新版本重新启动……
