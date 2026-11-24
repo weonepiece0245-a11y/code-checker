@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .. import __version__
@@ -12,6 +13,7 @@ from ..core import check_code
 
 app = FastAPI(title="代码检查助手")
 PAGE = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 class CheckRequest(BaseModel):
