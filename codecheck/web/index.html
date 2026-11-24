@@ -43,6 +43,8 @@ pre{background:var(--code);padding:10px;border-radius:8px;overflow:auto;font-siz
 .ai pre code{padding:0}
 .codewrap{position:relative}
 .codetools{display:flex;gap:6px;justify-content:flex-end;margin-top:4px}
+#updbar{display:none;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 20px;background:var(--code);border-bottom:1px solid var(--line);font-size:14px}
+#updbar button{padding:6px 14px;font-size:14px}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -51,8 +53,10 @@ pre{background:var(--code);padding:10px;border-radius:8px;overflow:auto;font-siz
 <header>
   <h1>代码检查助手</h1>
   <span class="muted">静态检查 → 安全运行 → AI 讲解错误和修改建议</span>
-  <span class="muted" id="ver" style="margin-left:auto;font-size:12px"></span>
+  <span style="margin-left:auto;font-size:12px" class="muted"><span id="ver"></span>
+    · <a href="#" id="checkupd" style="color:var(--accent)">检查更新</a></span>
 </header>
+<div id="updbar"><span id="updmsg"></span><button id="updbtn">一键更新</button></div>
 <main>
   <section class="panel">
     <div class="row">
@@ -120,9 +124,50 @@ $("code").addEventListener("keydown", e => {
 document.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) go(); });
 $("go").onclick = go;
 fetch("/api/info").then(r => r.json()).then(d => {
+  curVersion = d.version;
   $("ver").textContent = "版本 " + d.version;
   $("aiinfo").textContent = "自动模式当前会使用：" + ({api:"API key", cli:"Claude Code 订阅（claude 命令）", none:"不用 AI（没找到 API key 也没找到 claude 命令）"}[d.ai_auto]);
 });
+// ---------- 一键更新 ----------
+let curVersion = null;
+async function checkUpdate(manual) {
+  const bar = $("updbar"), msg = $("updmsg"), btn = $("updbtn");
+  if (manual) { bar.style.display = "flex"; msg.textContent = "正在检查更新…"; btn.style.display = "none"; }
+  try {
+    const d = await (await fetch("/api/update/check")).json();
+    if (d.has_update) {
+      bar.style.display = "flex"; btn.style.display = ""; btn.disabled = false;
+      msg.innerHTML = `发现新版本 <b>${d.remote}</b>（当前 ${d.local}）`;
+    } else if (manual) {
+      msg.textContent = d.error || `已经是最新版本 ${d.local}`;
+      setTimeout(() => bar.style.display = "none", 3000);
+    }
+  } catch { if (manual) msg.textContent = "检查更新失败"; }
+}
+$("checkupd").onclick = e => { e.preventDefault(); checkUpdate(true); };
+$("updbtn").onclick = async () => {
+  const msg = $("updmsg"), btn = $("updbtn");
+  btn.disabled = true; msg.innerHTML = '<span class="spinner"></span> 正在下载更新…';
+  try {
+    const d = await (await fetch("/api/update/apply", {method: "POST"})).json();
+    if (!d.ok) { msg.textContent = d.message; btn.disabled = false; return; }
+    msg.innerHTML = '<span class="spinner"></span> ' + d.message + "（大约 10 秒，页面会自动刷新）";
+    btn.style.display = "none";
+    const started = Date.now();
+    const poll = setInterval(async () => {
+      try {
+        const info = await (await fetch("/api/info", {cache: "no-store"})).json();
+        if (info.version !== curVersion) { clearInterval(poll); location.reload(); }
+      } catch {}
+      if (Date.now() - started > 90000) {
+        clearInterval(poll);
+        msg.textContent = "重启时间有点长，请关掉黑色窗口后双击桌面图标重新打开。";
+      }
+    }, 1500);
+  } catch { msg.textContent = "更新失败，请稍后再试"; btn.disabled = false; }
+};
+checkUpdate(false);
+
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function go() {

@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .. import __version__
+from .. import __version__, updater
 from ..ai import pick_backend
 from ..core import check_code
 
@@ -35,6 +35,29 @@ def index():
 @app.get("/api/info")
 def info():
     return {"ai_auto": pick_backend("auto"), "version": __version__}
+
+
+@app.get("/api/update/check")
+def update_check():
+    return updater.check()
+
+
+RESTART_CODE = 10  # 启动器看到这个退出码会重新启动
+
+
+@app.post("/api/update/apply")
+def update_apply():
+    import threading
+    info = updater.check()
+    if not info["has_update"]:
+        return {"ok": False, "message": info["error"] or "已经是最新版本"}
+    try:
+        updater.apply(updater.update_source(), info["remote"])
+    except Exception as e:
+        return {"ok": False, "message": f"下载更新失败：{e}"}
+    # 先把结果返回给网页，再退出，让启动器用新版本重新启动
+    threading.Timer(1.0, lambda: os._exit(RESTART_CODE)).start()
+    return {"ok": True, "message": f"已更新到 {info['remote']}，正在重启……", "version": info["remote"]}
 
 
 @app.post("/api/check")
@@ -84,7 +107,8 @@ def main():
     url = f"http://127.0.0.1:{port}"
     print(f"代码检查助手已启动：{url}")
     print("用完后关闭这个窗口即可停止。")
-    threading.Timer(1.5, lambda: webbrowser.open(url)).start()  # 自动打开浏览器
+    if not os.environ.get("CODECHECK_NO_BROWSER"):  # 更新后重启时不再开新标签页
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()  # 自动打开浏览器
     # 只监听本机：这个服务会运行代码，不要暴露到公网
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 

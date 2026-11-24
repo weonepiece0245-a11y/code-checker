@@ -30,29 +30,44 @@ def _get(url: str, timeout: int) -> bytes:
         return r.read()
 
 
-def main() -> int:
-    src_file = ROOT / "update_source.txt"
-    source = src_file.read_text(encoding="utf-8").strip() if src_file.exists() else ""
-    if not source:
-        return 0
-    local = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
+def update_source() -> str:
+    f = ROOT / "update_source.txt"
+    return f.read_text(encoding="utf-8").strip() if f.exists() else ""
+
+
+def local_version() -> str:
+    return (ROOT / "version.txt").read_text(encoding="utf-8").strip()
+
+
+def remote_version(source: str) -> str:
+    """先用 GitHub API（没有缓存延迟），失败再用 raw 地址（可能有 5 分钟缓存）。"""
     try:
-        remote = _get(f"https://raw.githubusercontent.com/{source}/main/version.txt", 5).decode().strip()
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{source}/contents/version.txt",
+            headers={"User-Agent": "codecheck-updater", "Accept": "application/vnd.github.raw"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.read().decode().strip()
     except Exception:
-        print("（检查更新失败，可能没联网，先用当前版本）")
-        return 0
-    if _ver(remote) <= _ver(local):
-        print(f"当前已是最新版本 {local}")
-        return 0
+        return _get(f"https://raw.githubusercontent.com/{source}/main/version.txt", 5).decode().strip()
 
-    print(f"发现新版本 {remote}（当前 {local}），正在下载更新……")
+
+def check() -> dict:
+    """给网页用：返回 {local, remote, has_update, error}。"""
+    source = update_source()
+    local = local_version()
+    if not source:
+        return {"local": local, "remote": None, "has_update": False, "error": "没有设置更新地址"}
     try:
-        data = _get(f"https://codeload.github.com/{source}/zip/refs/heads/main", 60)
-        zf = zipfile.ZipFile(io.BytesIO(data))
-    except Exception as e:
-        print(f"（下载更新失败：{e}，先用当前版本）")
-        return 0
+        remote = remote_version(source)
+    except Exception:
+        return {"local": local, "remote": None, "has_update": False, "error": "检查更新失败，可能没联网"}
+    return {"local": local, "remote": remote, "has_update": _ver(remote) > _ver(local), "error": ""}
 
+
+def apply(source: str, remote: str) -> None:
+    """下载并覆盖文件。失败时抛出异常。"""
+    data = _get(f"https://codeload.github.com/{source}/zip/refs/heads/main", 60)
+    zf = zipfile.ZipFile(io.BytesIO(data))
     old_req = (ROOT / "requirements.txt").read_bytes() if (ROOT / "requirements.txt").exists() else b""
     names = zf.namelist()
     prefix = names[0].split("/")[0] + "/"
@@ -69,13 +84,28 @@ def main() -> int:
                 (ROOT / (LAUNCHER + ".new")).write_bytes(content)
             continue
         target.write_bytes(content)
-
     if (ROOT / "requirements.txt").read_bytes() != old_req:
         (ROOT / ".deps_ok").unlink(missing_ok=True)  # 依赖变了，让启动器重新安装
-    # 删除旧的 Python 缓存，避免用到旧代码
     for cache in ROOT.rglob("__pycache__"):
         shutil.rmtree(cache, ignore_errors=True)
-    print(f"已更新到 {remote}")
+
+
+def main() -> int:
+    info = check()
+    if info["error"]:
+        if info["remote"] is None and update_source():
+            print("（" + info["error"] + "，先用当前版本）")
+        return 0
+    if not info["has_update"]:
+        print(f"当前已是最新版本 {info['local']}")
+        return 0
+    print(f"发现新版本 {info['remote']}（当前 {info['local']}），正在下载更新……")
+    try:
+        apply(update_source(), info["remote"])
+    except Exception as e:
+        print(f"（下载更新失败：{e}，先用当前版本）")
+        return 0
+    print(f"已更新到 {info['remote']}")
     return 10
 
 

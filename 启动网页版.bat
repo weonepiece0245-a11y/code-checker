@@ -39,6 +39,12 @@ if not exist ".deps_ok" (
 )
 
 %PY% -m codecheck.web.server
+if errorlevel 10 (
+  echo 正在用新版本重新启动……
+  set "CODECHECK_NO_BROWSER=1"
+  start "" "%~f0"
+  exit /b
+)
 echo.
 echo 服务已停止。如果上面有错误信息，请截图发给 Claude。
 pause
