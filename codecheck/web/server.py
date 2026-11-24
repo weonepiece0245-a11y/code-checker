@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .. import __version__, updater
+from .. import __version__, testgen, updater
 from ..ai import pick_backend
 from ..core import check_code
 
@@ -45,6 +45,16 @@ def update_check():
 
 
 RESTART_CODE = 10  # 启动器看到这个退出码会重新启动
+RESTART_HOOK = None  # 桌面应用会设置自己的重启方式
+WATCHDOG = False  # 桌面应用的备用模式：页面关闭后自动退出
+LAST_PING = 0.0
+
+
+@app.post("/api/ping")
+def ping():
+    global LAST_PING
+    LAST_PING = time.time()
+    return {"ok": True}
 
 
 @app.post("/api/update/apply")
@@ -58,8 +68,39 @@ def update_apply():
     except Exception as e:
         return {"ok": False, "message": f"下载更新失败：{e}"}
     # 先把结果返回给网页，再退出，让启动器用新版本重新启动
-    threading.Timer(1.0, lambda: os._exit(RESTART_CODE)).start()
+    threading.Timer(1.0, RESTART_HOOK or (lambda: os._exit(RESTART_CODE))).start()
     return {"ok": True, "message": f"已更新到 {info['remote']}，正在重启……", "version": info["remote"]}
+
+
+class GenTestsRequest(BaseModel):
+    code: str = Field(max_length=200_000)
+    language: str | None = None
+    ai: str = "auto"
+    explain_lang: str = "简体中文"
+
+
+@app.post("/api/tests/generate")
+def tests_generate(req: GenTestsRequest):
+    try:
+        return testgen.generate(req.code, req.language or None, req.explain_lang, req.ai)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+class RunTestsRequest(BaseModel):
+    code: str = Field(max_length=200_000)
+    language: str | None = None
+    tests: list[dict]
+    timeout: int = Field(5, ge=1, le=60)
+    sandbox: str = "local"
+
+
+@app.post("/api/tests/run")
+def tests_run(req: RunTestsRequest):
+    try:
+        return testgen.run(req.code, req.tests, req.language or None, req.timeout, req.sandbox)
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.post("/api/check")

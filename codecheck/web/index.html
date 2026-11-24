@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>代码检查助手</title>
+<link rel="icon" href="/static/app.png">
 <script src="/static/marked.min.js"></script>
 <script src="/static/purify.min.js"></script>
 <style>
@@ -45,6 +46,19 @@ pre{background:var(--code);padding:10px;border-radius:8px;overflow:auto;font-siz
 .codetools{display:flex;gap:6px;justify-content:flex-end;margin-top:4px}
 #updbar{display:none;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 20px;background:var(--code);border-bottom:1px solid var(--line);font-size:14px}
 #updbar button{padding:6px 14px;font-size:14px}
+.col{display:flex;flex-direction:column;gap:16px;min-width:0}
+button.second{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+.bar{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin:6px 0 10px}
+.bar>i{display:block;height:100%;background:var(--ok)}
+.test{border:1px solid var(--line);border-radius:8px;margin:6px 0;padding:8px 10px}
+.test.fail{border-color:var(--err)}
+.test summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:baseline}
+.test summary::-webkit-details-marker{display:none}
+.test .mark{font-weight:700}.test.pass .mark{color:var(--ok)}.test.fail .mark{color:var(--err)}
+.test .purpose{font-size:13px;color:var(--muted);margin:2px 0 4px 22px}
+.test .kv{font-size:13px;margin:4px 0 0 22px}
+.test .kv b{color:var(--muted);font-weight:500}
+.test pre{margin:3px 0}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -75,10 +89,14 @@ pre{background:var(--code);padding:10px;border-radius:8px;overflow:auto;font-siz
       <label>AI <select id="ai"><option value="auto">自动</option><option value="cli">Claude Code 订阅</option><option value="api">API key</option><option value="none">不用 AI</option></select></label>
       <label>讲解语言 <select id="explain"><option>简体中文</option><option>繁體中文</option><option>English</option></select></label>
       <button id="go">检查（Ctrl+Enter）</button>
+      <button id="gentests" class="second">AI 生成测试</button>
     </div>
     <div class="muted" id="aiinfo" style="font-size:12px"></div>
   </section>
-  <section class="panel" id="out"><p class="muted">结果会显示在这里。</p></section>
+  <div class="col">
+    <section class="panel" id="out"><p class="muted">结果会显示在这里。</p></section>
+    <section class="panel" id="testsout" style="display:none"></section>
+  </div>
 </main>
 <script>
 const SAMPLES = {
@@ -128,6 +146,72 @@ fetch("/api/info").then(r => r.json()).then(d => {
   $("ver").textContent = "版本 " + d.version;
   $("aiinfo").textContent = "自动模式当前会使用：" + ({api:"API key", cli:"Claude Code 订阅（claude 命令）", none:"不用 AI（没找到 API key 也没找到 claude 命令）"}[d.ai_auto]);
 });
+// ---------- AI 生成测试 ----------
+let lastTests = null;  // {summary, tests, language}
+async function post(url, body) {
+  const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) throw new Error("服务器返回 " + r.status);
+  return r.json();
+}
+function testsBusy(html) {
+  const box = $("testsout"); box.style.display = "";
+  box.innerHTML = '<p><span class="spinner"></span> ' + html + '</p>';
+  box.scrollIntoView({behavior: "smooth", block: "start"});
+}
+async function genTests() {
+  const code = $("code").value;
+  if (!code.trim()) { testsBusy("请先输入代码。"); return; }
+  $("gentests").disabled = true;
+  testsBusy("AI 正在读代码、设计测试，大约需要 10~40 秒…");
+  try {
+    const g = await post("/api/tests/generate", {code, language: $("lang").value || null,
+      ai: $("ai").value === "none" ? "auto" : $("ai").value, explain_lang: $("explain").value});
+    if (g.error) throw new Error(g.error);
+    lastTests = g;
+    await runTests();
+  } catch (e) {
+    $("testsout").innerHTML = '<p style="color:var(--err)">生成测试失败：' + esc(e.message) + '</p>';
+  } finally { $("gentests").disabled = false; }
+}
+async function runTests() {
+  if (!lastTests) return;
+  testsBusy("正在逐个运行测试…");
+  try {
+    const r = await post("/api/tests/run", {code: $("code").value, language: lastTests.language,
+      tests: lastTests.tests, timeout: +$("timeout").value || 5, sandbox: $("sandbox").value});
+    if (r.error) throw new Error(r.error);
+    renderTests(r);
+  } catch (e) {
+    $("testsout").innerHTML = '<p style="color:var(--err)">运行测试失败：' + esc(e.message) + '</p>';
+  }
+}
+function renderTests(r) {
+  const pct = r.total ? Math.round(r.passed / r.total * 100) : 0;
+  const all = r.passed === r.total;
+  let h = `<h2>测试结果 <span class="badge ${all ? "ok" : "bad"}">${r.passed} / ${r.total} 通过</span></h2>`;
+  h += `<div class="bar"><i style="width:${pct}%"></i></div>`;
+  h += `<p class="muted" style="margin:0 0 8px">代码的用途：${esc(lastTests.summary)}</p>`;
+  h += `<div class="row" style="margin:0 0 6px"><button class="ghost" id="rerun">用当前代码重新运行这些测试</button>
+        <button class="ghost" id="regen">重新生成测试</button></div>`;
+  if (!all) h += `<p class="muted" style="font-size:13px;margin:4px 0">提示：点检查结果里的“放回编辑器”换成修好的代码，再点“用当前代码重新运行这些测试”，看看是不是全部通过。</p>`;
+  r.results.forEach((t, i) => {
+    const what = t.kind === "call" ? `<div class="kv"><b>测试代码</b><pre>${esc(t.code)}</pre></div>`
+      : `<div class="kv"><b>输入</b><pre>${esc(t.stdin) || "（无）"}</pre></div>`;
+    const actual = t.timed_out ? "超时（可能有死循环；如果是函数测试，也可能是顶层代码卡住了）" : (t.actual_output.trim() || "（无输出）");
+    h += `<details class="test ${t.passed ? "pass" : "fail"}" ${t.passed ? "" : "open"}>
+      <summary><span class="mark">${t.passed ? "✓" : "✗"}</span><span>${i + 1}. ${esc(t.name)}</span></summary>
+      <div class="purpose">${esc(t.purpose)}</div>${what}
+      <div class="kv"><b>期望输出</b>${t.expect_error ? "（应该报错）" : ""}<pre>${esc(t.expected_output.trim()) || "（无输出）"}</pre></div>
+      <div class="kv"><b>实际输出</b><pre>${esc(actual)}</pre></div>
+      ${t.error_line ? `<div class="kv"><b>报错</b><pre style="color:var(--err)">${esc(t.error_line)}</pre></div>` : ""}
+    </details>`;
+  });
+  $("testsout").innerHTML = h;
+  $("rerun").onclick = runTests;
+  $("regen").onclick = genTests;
+}
+$("gentests").onclick = genTests;
+
 // ---------- 一键更新 ----------
 let curVersion = null;
 async function checkUpdate(manual) {
@@ -167,6 +251,9 @@ $("updbtn").onclick = async () => {
   } catch { msg.textContent = "更新失败，请稍后再试"; btn.disabled = false; }
 };
 checkUpdate(false);
+// 心跳：告诉程序窗口还开着（备用窗口模式下，窗口关闭后程序会自动退出）
+const ping = () => fetch("/api/ping", {method: "POST"}).catch(() => {});
+ping(); setInterval(ping, 5000);
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 

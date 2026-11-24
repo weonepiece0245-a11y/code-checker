@@ -1,6 +1,15 @@
 # 代码检查助手（codecheck）
 
-检查代码 → 在受限环境里实际运行 → 用 AI 讲解错误、给修改建议和修好后的代码。
+检查代码 → 在受限环境里实际运行 → 用 AI 讲解错误、给修改建议和修好后的代码 → AI 自动生成测试并逐个运行。
+
+## 功能
+
+- **检查**：找出语法错误、拼错的变量名等问题，并在受限环境里实际运行代码。
+- **AI 讲解**：用中文解释错误原因，给出修好的完整代码（可一键“复制”或“放回编辑器”）。
+- **AI 生成测试**：AI 读懂代码的用途后设计 5~8 个测试（含边界情况），逐个运行并显示通过/失败。
+  修好代码后点“用当前代码重新运行这些测试”，确认真的修好了。
+- **桌面应用**：独立窗口，不用浏览器；关掉窗口即退出。
+- **自动更新**：启动时自动更新，或在应用里点“一键更新”。
 
 目前支持的编程语言：**Python**、**JavaScript**。AI 默认用**简体中文**讲解（可以改成繁体中文或英文）。
 
@@ -10,7 +19,9 @@
 2. 检查 JavaScript 代码还需要安装 [Node.js](https://nodejs.org/)（只检查 Python 可以不装）。
 3. 把解压出来的文件夹放到一个固定的位置（比如 `D:\code-checker`），然后双击 **`启动网页版.bat`**。第一次运行会自动安装组件，然后自动打开浏览器。
 4. 运行一次后，桌面上会出现 **“代码检查助手”** 图标，以后双击它就能打开。
-5. 用完后关掉那个黑色命令行窗口即可停止。
+5. 程序会在独立的窗口里打开，用完直接关掉窗口即可。
+
+想用浏览器版：在命令行运行 `启动网页版.bat web`。
 
 ## 自动更新
 
@@ -42,9 +53,16 @@ python -m codecheck examples/buggy.js --ai none        # 不用 AI，速度快
 python -m codecheck 我的代码.py --input "5\n3"          # 给程序喂输入
 python -m codecheck 我的代码.py --explain-lang English  # 用英文讲解
 python -m codecheck 我的代码.py --json                  # 输出 JSON，给其他程序调用
+python -m codecheck 我的代码.py --tests                 # 让 AI 生成测试并运行
 ```
 
-## 用法二：网页
+## 用法二：桌面应用
+
+```bash
+python -m codecheck.app
+```
+
+## 用法三：网页
 
 ```bash
 python -m codecheck.web.server
@@ -67,8 +85,12 @@ codecheck/
   runner.py        受限运行 / Docker 运行
   ai.py            AI 分析（API key 或 Claude Code）
   core.py          把上面几步串起来
+  testgen.py       AI 生成测试 + 逐个运行
+  app.py           桌面应用窗口
+  updater.py       自动更新
+  deps.py          检查和安装组件
   cli.py           命令行
-  web/             网页版
+  web/             界面（桌面应用和网页版共用）
 examples/          带 bug 的示例代码
 ```
 
@@ -77,5 +99,4 @@ examples/          带 bug 的示例代码
 - [ ] VS Code 插件：保存文件时自动检查（调用 `python -m codecheck 文件 --json`）
 - [ ] GitHub 机器人：有人提交 PR 时自动检查并留言
 - [ ] 一键应用 AI 的修改
-- [ ] 让 AI 自动生成测试用例并实际运行
 - [ ] 支持更多编程语言（Java、C/C++、Go……）

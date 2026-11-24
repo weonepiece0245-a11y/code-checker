@@ -4,6 +4,7 @@
 - api：用 Anthropic API key（环境变量 ANTHROPIC_API_KEY），按调用量计费。
 - cli：调用本机已登录的 Claude Code（`claude -p`），用的是你的 Claude 订阅额度，不需要 API key。
 """
+import json
 import os
 import shutil
 import subprocess
@@ -155,3 +156,69 @@ def analyze(language_name: str, code: str, issues: list, run: dict | None, stdin
     if backend == "cli":
         return "cli", _via_cli(system, user)
     raise ValueError(f"未知的 AI 后端：{backend}")
+
+
+# ---------- 结构化输出（生成测试等功能用）----------
+
+def _structured_api(system: str, user: str, schema: dict) -> dict:
+    import anthropic
+
+    client = anthropic.Anthropic()
+    try:
+        resp = client.beta.messages.create(
+            model=MODEL,
+            max_tokens=16000,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": schema}},
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+        )
+    except anthropic.APIStatusError as e:
+        raise RuntimeError(f"API 出错（{e.status_code}）：{e.message}") from None
+    except anthropic.APIConnectionError:
+        raise RuntimeError("连不上 Anthropic API，请检查网络") from None
+    if resp.stop_reason == "refusal":
+        raise RuntimeError("AI 拒绝处理这段代码")
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    return json.loads(text)
+
+
+def _structured_cli(system: str, user: str, schema: dict) -> dict:
+    exe = find_claude()
+    if not exe:
+        raise RuntimeError("没有找到 claude 命令，请先安装并登录 Claude Code")
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        f.write(system)
+        sys_file = f.name
+    cmd = [exe, "-p", "--tools", "", "--system-prompt-file", sys_file, "--output-format", "json",
+           "--json-schema", json.dumps(schema, ensure_ascii=False), "--no-session-persistence"]
+    if os.environ.get("CODECHECK_MODEL"):
+        cmd += ["--model", MODEL]
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    try:
+        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=400,
+                           encoding="utf-8", errors="replace", env=env)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Claude Code 响应超时") from None
+    finally:
+        os.unlink(sys_file)
+    try:
+        out = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError("Claude Code 调用失败：" + (p.stderr or p.stdout).strip()[:500]) from None
+    if out.get("is_error"):
+        raise RuntimeError("Claude Code 出错：" + str(out.get("result", ""))[:500])
+    if isinstance(out.get("structured_output"), dict):
+        return out["structured_output"]
+    return json.loads(out.get("result", "{}"))
+
+
+def structured(system: str, user: str, schema: dict, backend: str = "auto") -> tuple[str, dict]:
+    """让 AI 按 JSON Schema 返回结果。返回 (使用的后端, 数据)。"""
+    backend = pick_backend(backend)
+    if backend == "api":
+        return "api", _structured_api(system, user, schema)
+    if backend == "cli":
+        return "cli", _structured_cli(system, user, schema)
+    raise RuntimeError("这个功能需要 AI：请登录 Claude Code 或设置 API key")

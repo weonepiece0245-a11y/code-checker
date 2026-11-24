@@ -43,6 +43,7 @@ def main(argv=None):
                    help="auto=优先用 Claude Code 订阅，没有才用 API key；none=不用 AI")
     p.add_argument("--explain-lang", default="简体中文", help="AI 讲解使用的语言（默认简体中文）")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    p.add_argument("--tests", action="store_true", help="让 AI 生成测试并逐个运行")
     a = p.parse_args(argv)
 
     code = sys.stdin.read() if a.file == "-" else open(a.file, encoding="utf-8").read()
@@ -90,6 +91,17 @@ def main(argv=None):
         print(r["ai"])
     elif r["ai_error"]:
         print(color("\nAI 分析失败：" + r["ai_error"], "yellow"))
+
+    if a.tests:
+        from . import testgen
+        print(color("\n━━ AI 生成测试 ━━", "bold"))
+        try:
+            g = testgen.generate(code, a.lang, a.explain_lang, "auto" if a.ai == "none" else a.ai)
+            t = testgen.run(code, g["tests"], g["language"], a.timeout, a.sandbox)
+            print("代码的用途：" + g["summary"])
+            print(testgen.format_report(t))
+        except Exception as e:
+            print(color("生成测试失败：" + str(e), "yellow"))
 
     print(color("\n结论：通过 ✓", "green") if r["passed"] else color("\n结论：有问题 ✗", "red"))
     return 0 if r["passed"] else 1

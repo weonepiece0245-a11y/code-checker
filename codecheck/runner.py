@@ -71,8 +71,9 @@ def _clean_env(workdir: str) -> dict:
     return env
 
 
-def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: int) -> RunResult:
-    cmd = [part.replace("{file}", path) for part in lang.run_cmd]
+def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: int,
+              extra_args: list | None = None) -> RunResult:
+    cmd = [part.replace("{file}", path) for part in lang.run_cmd] + list(extra_args or [])
     if cmd[0] == "python3":
         cmd[0] = sys.executable
     env = _clean_env(os.path.dirname(path))
@@ -99,11 +100,13 @@ def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: in
     return RunResult(None if timed_out else code, _clip(out), _clip(err), dur, timed_out, "local", note)
 
 
-def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: int) -> RunResult:
+def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: int,
+               extra_args: list | None = None) -> RunResult:
     if not shutil.which("docker"):
         raise RuntimeError("没有安装 Docker")
     folder, fname = os.path.split(path)
     inner = [part.replace("{file}", f"/code/{fname}") for part in lang.run_cmd]
+    inner += [f"/code/{a}" for a in (extra_args or [])]
     cmd = ["docker", "run", "--rm", "-i", "--network", "none", f"--memory={memory_mb}m",
            "--cpus=1", "--pids-limit=64", "--read-only", "--tmpfs", "/tmp:size=16m",
            "-v", f"{folder}:/code:ro", "-w", "/tmp", lang.docker_image, *inner]
@@ -122,7 +125,8 @@ def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: i
 
 
 def run(lang: Language, path: str, stdin: str = "", timeout: int = 5, memory_mb: int = 256,
-        mode: str = "local") -> RunResult:
+        mode: str = "local", sandbox: str | None = None, extra_args: list | None = None) -> RunResult:
+    mode = sandbox or mode
     if mode == "docker":
-        return run_docker(lang, path, stdin, timeout, memory_mb)
-    return run_local(lang, path, stdin, timeout, memory_mb)
+        return run_docker(lang, path, stdin, timeout, memory_mb, extra_args)
+    return run_local(lang, path, stdin, timeout, memory_mb, extra_args)

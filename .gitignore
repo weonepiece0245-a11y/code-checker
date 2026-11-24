@@ -2,3 +2,8 @@ __pycache__/
 .ruff_cache/
 *.pyc
 *.zip
+.deps_ok
+.webview_failed
+.app_ready
+app.log
+*.new

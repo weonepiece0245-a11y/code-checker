@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title 代码检查助手
 
 rem 自动更新下载了新的启动器时，先替换自己再重新启动
-if exist "%~f0.new" (move /y "%~f0.new" "%~f0" >nul & start "" "%~f0" & exit /b)
+if exist "%~f0.new" (move /y "%~f0.new" "%~f0" >nul & start "" "%~f0" %* & exit /b)
 
 set "PY=python"
 python --version >nul 2>nul
@@ -23,26 +23,34 @@ if errorlevel 1 (
 rem 在桌面创建或刷新快捷方式
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create_shortcut.ps1" >nul 2>nul
 
-rem 检查更新
+echo 正在检查更新……
 %PY% -m codecheck.updater
-if errorlevel 10 (start "" "%~f0" & exit /b)
+if errorlevel 10 (start "" "%~f0" %* & exit /b)
 
-if not exist ".deps_ok" (
-  echo 正在安装需要的组件，请稍等……
-  %PY% -m pip install -r requirements.txt
-  if errorlevel 1 (
-    echo 安装失败，请把上面的错误信息截图发给 Claude。
-    pause
-    exit /b 1
-  )
-  echo ok> .deps_ok
+%PY% -m codecheck.deps
+if errorlevel 1 (
+  pause
+  exit /b 1
 )
 
+rem 加参数 web 可以用浏览器版：启动网页版.bat web
+if /i "%~1"=="web" goto web
+
+echo 正在打开代码检查助手……
+%PY% -m codecheck.app --detach
+if errorlevel 2 (
+  echo.
+  echo 桌面窗口打不开，改用浏览器打开。请把上面的信息截图发给 Claude。
+  goto web
+)
+exit /b 0
+
+:web
 %PY% -m codecheck.web.server
 if errorlevel 10 (
   echo 正在用新版本重新启动……
   set "CODECHECK_NO_BROWSER=1"
-  start "" "%~f0"
+  start "" "%~f0" web
   exit /b
 )
 echo.
