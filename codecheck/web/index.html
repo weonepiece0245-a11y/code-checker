@@ -109,6 +109,7 @@ button.ai{background:linear-gradient(90deg,#2563eb,#7c3aed)}
 .st.fixed{color:var(--ok);border:1px solid var(--ok)} .st.partial{color:#ea580c;border:1px solid #ea580c}
 .st.not_fixed{color:var(--err);border:1px solid var(--err)} .st.unclear{color:var(--muted);border:1px solid var(--line)}
 .rv.fixed{border-left-color:var(--ok);opacity:.85}
+pre.runout{max-height:320px;overflow:auto}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -630,8 +631,9 @@ function render(d) {
     const x = d.run;
     h += `<h2>运行结果 <span class="badge ${x.ok ? "ok" : "bad"}">${x.ok ? "正常结束" : (x.timed_out ? "超时" : "退出码 " + x.exit_code)}</span> <span class="muted" style="font-weight:400;font-size:13px">${x.duration_ms}ms · ${x.mode === "docker" ? "Docker" : "本机"}</span></h2>`;
     if (x.note) h += `<p style="color:var(--warn)">${esc(x.note)}</p>`;
-    h += `<div class="muted">输出</div><pre>${esc(x.stdout) || "（空）"}</pre>`;
-    if (x.stderr) h += `<div class="muted">错误输出</div><pre style="color:var(--err)">${esc(x.stderr)}</pre>`;
+    const nOut = x.stdout ? x.stdout.split("\n").length : 0;
+    h += `<div class="muted">输出${nOut > 15 ? `（共 ${nOut} 行，框里可以滚动）` : ""}</div><pre class="runout">${esc(x.stdout) || "（空）"}</pre>`;
+    if (x.stderr) h += `<div class="muted">错误输出</div><pre class="runout" style="color:var(--err)">${esc(x.stderr)}</pre>`;
   }
   if (d.ai) {
     const md = (window.marked && window.DOMPurify) ? DOMPurify.sanitize(marked.parse(d.ai))
