@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .. import __version__, files, folder, folder_ai, testgen, updater
+from .. import __version__, files, folder, folder_ai, store, testgen, updater
 from ..ai import pick_backend
 from ..core import check_code
 
@@ -146,7 +146,7 @@ def fs_pick(req: PickRequest):
 
 class PathRequest(BaseModel):
     path: str
-    exclude: list[str] = []
+    exclude: list[str] | None = None  # 不传就用保存的设置
 
 
 @app.post("/api/fs/read")
@@ -172,11 +172,30 @@ def fs_save(req: SaveRequest):
         return {"error": str(e)}
 
 
+def _exclude(req) -> list[str]:
+    if req.exclude is None:
+        return store.get("exclude", os.path.abspath(req.path), [])
+    return req.exclude
+
+
+class ExcludeRequest(BaseModel):
+    path: str
+    exclude: list[str]
+
+
+@app.post("/api/fs/exclude")
+def fs_exclude(req: ExcludeRequest):
+    store.put("exclude", os.path.abspath(req.path), sorted(set(req.exclude)))
+    return {"ok": True}
+
+
 @app.post("/api/fs/ai_plan")
 def fs_ai_plan(req: PathRequest):
     try:
-        p = folder_ai.plan(req.path, exclude=req.exclude)
+        p = folder_ai.plan(req.path, exclude=_exclude(req))
+        last = folder_ai.last_review(req.path)
         return {"files": len(p["included"]), "chars": p["chars"], "skipped": p["skipped"],
+                "last_review": {"time": last["time"], "issues": len(last["issues"])} if last else None,
                 "total": p["scan"]["total"]}
     except Exception as e:
         return {"error": str(e)}
@@ -184,7 +203,7 @@ def fs_ai_plan(req: PathRequest):
 
 class AIReviewRequest(BaseModel):
     path: str
-    exclude: list[str] = []
+    exclude: list[str] | None = None
     ai: str = "auto"
     explain_lang: str = "简体中文"
 
@@ -193,7 +212,16 @@ class AIReviewRequest(BaseModel):
 def fs_ai_review(req: AIReviewRequest):
     try:
         return folder_ai.review(req.path, req.explain_lang, "auto" if req.ai == "none" else req.ai,
-                                req.exclude)
+                                _exclude(req))
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/fs/ai_recheck")
+def fs_ai_recheck(req: AIReviewRequest):
+    try:
+        return folder_ai.recheck(req.path, req.explain_lang, "auto" if req.ai == "none" else req.ai,
+                                 _exclude(req))
     except Exception as e:
         return {"error": str(e)}
 
@@ -201,7 +229,10 @@ def fs_ai_review(req: AIReviewRequest):
 @app.post("/api/fs/scan")
 def fs_scan(req: PathRequest):
     try:
-        return folder.scan(req.path, req.exclude)
+        r = folder.scan(req.path, _exclude(req))
+        last = folder_ai.last_review(req.path)
+        r["last_review"] = {"time": last["time"], "issues": len(last["issues"])} if last else None
+        return r
     except Exception as e:
         return {"error": str(e)}
 

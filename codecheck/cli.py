@@ -45,6 +45,7 @@ def main(argv=None):
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     p.add_argument("--tests", action="store_true", help="让 AI 生成测试并逐个运行")
     p.add_argument("--ai-review", action="store_true", help="检查文件夹时，再让 AI 审查整个项目")
+    p.add_argument("--ai-recheck", action="store_true", help="AI 复查：上次 AI 审查的问题解决了没有")
     a = p.parse_args(argv)
 
     if a.file != "-" and os.path.isdir(a.file):
@@ -54,6 +55,14 @@ def main(argv=None):
             print(json.dumps(r, ensure_ascii=False, indent=2))
         else:
             print(folder.format_report(r))
+        if a.ai_recheck:
+            from . import folder_ai
+            print(color("\n━━ AI 复查：上次的问题解决了吗（可能需要 1~3 分钟）━━", "bold"))
+            try:
+                print(folder_ai.format_recheck(folder_ai.recheck(a.file, a.explain_lang,
+                                                                 "auto" if a.ai == "none" else a.ai)))
+            except Exception as e:
+                print(color("AI 复查失败：" + str(e), "yellow"))
         if a.ai_review:
             from . import folder_ai
             print(color("\n━━ AI 审查整个文件夹（可能需要 1~3 分钟）━━", "bold"))

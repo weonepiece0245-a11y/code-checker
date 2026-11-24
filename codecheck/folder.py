@@ -4,7 +4,9 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from . import static_check
+from collections import Counter
+
+from . import static_check, store
 from .proc import NO_WINDOW
 
 EXT = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript"}
@@ -148,10 +150,12 @@ def _line_count(path: str) -> int:
         return 0
 
 
-def scan(folder: str, exclude: list[str] | None = None) -> dict:
+def scan(folder: str, exclude: list[str] | None = None, compare: bool = True) -> dict:
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
         raise ValueError("文件夹不存在")
+    if exclude is None:
+        exclude = store.get("exclude", folder, [])
     files, truncated, skipped = find_files(folder, exclude)
     issues: dict[str, list] = {f: [] for f in files}
     notes = []
@@ -185,7 +189,7 @@ def scan(folder: str, exclude: list[str] | None = None) -> dict:
             "issues": [i.to_dict() for i in found],
         })
     out.sort(key=lambda f: (-f["errors"], -f["warnings"], f["rel"].lower()))
-    return {
+    result = {
         "folder": folder,
         "files": out,
         "total": len(out),
@@ -197,11 +201,54 @@ def scan(folder: str, exclude: list[str] | None = None) -> dict:
         "exclude": list(exclude or []),
         "dirs": dir_summary(out),
     }
+    if compare:
+        result["compare"] = compare_with_last(result)
+    return result
+
+
+def _keys(files: list[dict]) -> list[tuple]:
+    # 用“文件 + 规则 + 说明”判断是不是同一个问题；不用行号，因为改代码后行号会变
+    return [(f["rel"].replace("\\", "/"), i["code"], i["message"], i["line"], i["severity"])
+            for f in files for i in f["issues"]]
+
+
+def compare_with_last(r: dict) -> dict | None:
+    """和上一次检查这个文件夹的结果比较，并把这次的结果存起来。"""
+    now_items = _keys(r["files"])
+    last = store.get("scan", r["folder"])
+    store.put("scan", r["folder"], {"time": store.now(), "items": now_items})
+    if not last:
+        return None
+    old = Counter(tuple(x[:3]) for x in last["items"])
+    new = Counter(tuple(x[:3]) for x in now_items)
+    gone, added = old - new, new - old
+    line_old = {tuple(x[:3]): x for x in last["items"]}
+    line_new = {tuple(x[:3]): x for x in now_items}
+
+    def lst(counter, lookup):
+        out = []
+        for k, n in counter.items():
+            x = lookup[k]
+            out += [{"rel": x[0], "code": x[1], "message": x[2], "line": x[3], "severity": x[4]}] * n
+        return sorted(out, key=lambda i: (i["severity"] != "error", i["rel"]))[:100]
+
+    return {"last_time": last["time"], "last_total": len(last["items"]), "now_total": len(now_items),
+            "resolved": lst(gone, line_old), "new": lst(added, line_new),
+            "resolved_count": sum(gone.values()), "new_count": sum(added.values()),
+            "remaining_count": len(now_items) - sum(added.values())}
 
 
 def format_report(r: dict) -> str:
     lines = [f"文件夹：{r['folder']}",
              f"共 {r['total']} 个代码文件，{r['with_errors']} 个有错误，{r['with_warnings']} 个只有警告"]
+    c = r.get("compare")
+    if c:
+        lines.append(f"和上次（{c['last_time']}）相比：已解决 {c['resolved_count']} 个，"
+                     f"还剩 {c['remaining_count']} 个，新出现 {c['new_count']} 个")
+        for i in c["resolved"]:
+            lines.append(f"    ✓ 已解决 {i['rel']} [{i['code']}] {i['message']}")
+        for i in c["new"]:
+            lines.append(f"    + 新问题 {i['rel']} 第 {i['line']} 行 [{i['code']}] {i['message']}")
     if r["truncated"]:
         lines.append(f"（文件太多，只检查了前 {MAX_FILES} 个）")
     sk = r.get("skipped") or {}

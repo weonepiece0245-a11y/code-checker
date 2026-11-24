@@ -90,6 +90,13 @@ button.ai{background:linear-gradient(90deg,#2563eb,#7c3aed)}
 .chip button{background:transparent;color:var(--err);border:0;padding:0 6px;font-size:12px;cursor:pointer}
 .chip.ex{opacity:.75;text-decoration:line-through}
 .chip.ex button{color:var(--accent);text-decoration:none}
+.cmp{border:1px solid var(--line);background:var(--code);border-radius:8px;padding:8px 12px;margin:6px 0 10px;font-size:14px}
+.cmp b.ok{color:var(--ok)} .cmp b.bad{color:var(--err)} .cmp b.new{color:#ea580c}
+.cmp .it{font-size:13px;margin:2px 0 2px 14px;overflow-wrap:anywhere}
+.st{font-size:12.5px;font-weight:600;padding:1px 8px;border-radius:99px;white-space:nowrap}
+.st.fixed{color:var(--ok);border:1px solid var(--ok)} .st.partial{color:#ea580c;border:1px solid #ea580c}
+.st.not_fixed{color:var(--err);border:1px solid var(--err)} .st.unclear{color:var(--muted);border:1px solid var(--line)}
+.rv.fixed{border-left-color:var(--ok);opacity:.85}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -264,11 +271,8 @@ window.addEventListener("beforeunload", e => { if (isDirty()) { e.preventDefault
 
 // ---------- 检查文件夹 ----------
 let dirsOpen = false;  // 记住“各文件夹的文件数”是否展开
-function getExclude(path) {
-  try { return JSON.parse(localStorage.getItem("exclude:" + path) || "[]"); } catch { return []; }
-}
-function setExclude(path, list) {
-  try { localStorage.setItem("exclude:" + path, JSON.stringify(list)); } catch {}
+async function setExclude(path, list) {
+  await post("/api/fs/exclude", {path, exclude: list});
 }
 async function scanFolder(path, quiet) {
   const box = $("folderout");
@@ -282,7 +286,7 @@ async function scanFolder(path, quiet) {
     lastFolder = path;
     box.style.display = "";
     if (!quiet) box.innerHTML = '<p><span class="spinner"></span> 正在检查文件夹里的所有代码文件…</p>';
-    const r = await post("/api/fs/scan", {path, exclude: getExclude(path)});
+    const r = await post("/api/fs/scan", {path});
     if (r.error) throw new Error(r.error);
     renderFolder(r);
   } catch (e) {
@@ -313,8 +317,27 @@ function renderFolder(r) {
     h += `</div></details>`;
   }
   r.notes.forEach(n => h += `<p style="color:var(--warn);font-size:13px">${esc(n)}</p>`);
-  h += `<div class="row" style="margin:4px 0">${r.total ? '<button class="ai" id="aireview">🤖 AI 审查整个文件夹</button>' : ""}
+  const c = r.compare;
+  if (c) {
+    h += `<div class="cmp">🔁 和上次检查（${esc(c.last_time)}）相比：
+      <b class="ok">✅ 已解决 ${c.resolved_count}</b> · <b class="bad">❌ 还剩 ${c.remaining_count}</b> · <b class="new">🆕 新出现 ${c.new_count}</b>
+      ${c.resolved_count === 0 && c.new_count === 0 ? '<div class="muted" style="font-size:13px">（和上次一样，没有变化）</div>' : ""}
+      ${c.resolved.length ? `<details ${c.resolved.length <= 8 ? "open" : ""}><summary style="cursor:pointer;font-size:13px">已解决的问题</summary>
+        ${c.resolved.map(i => `<div class="it">✅ ${esc(i.rel)} <code>${esc(i.code)}</code> ${esc(i.message)}</div>`).join("")}</details>` : ""}
+      ${c.new.length ? `<details open><summary style="cursor:pointer;font-size:13px">新出现的问题（可能是修改时带进来的）</summary>
+        ${c.new.map(i => `<div class="it">🆕 ${esc(i.rel)} 第 ${i.line} 行 <code>${esc(i.code)}</code> ${esc(i.message)}</div>`).join("")}</details>` : ""}
+      <div class="muted" style="font-size:12.5px;margin-top:4px">这里只对比快速检查能发现的问题。AI 审查发现的问题，请用下面的“AI 复查”确认。</div>
+    </div>`;
+  }
+  const lr = r.last_review;
+  let aiBtns = "";
+  if (r.total) aiBtns = lr
+    ? `<button class="ai" data-mode="recheck">🤖 AI 复查：上次的 ${lr.issues} 个问题解决了吗？</button>
+       <button class="ghost" data-mode="review">重新完整审查</button>`
+    : `<button class="ai" data-mode="review">🤖 AI 审查整个文件夹</button>`;
+  h += `<div class="row" style="margin:4px 0">${aiBtns}
         <button class="ghost" id="rescan">重新检查文件夹</button><button class="ghost" id="closefolder">关闭</button></div>`;
+  if (lr) h += `<p class="muted" style="font-size:12.5px;margin:0 0 6px">上次 AI 审查：${esc(lr.time)}，还有 ${lr.issues} 个问题待确认</p>`;
   if (!r.total) h += `<p class="muted">这个文件夹里没有找到 .py 或 .js 文件。</p>`;
   bad.forEach((f, idx) => {
     h += `<details class="frow ${f.errors ? "err" : "warn"}" ${idx < 5 ? "open" : ""}>
@@ -338,16 +361,14 @@ function renderFolder(r) {
   });
   $("rescan").onclick = () => scanFolder(lastFolder);
   $("closefolder").onclick = () => { box.style.display = "none"; $("folderai").style.display = "none"; lastFolder = null; };
-  if ($("aireview")) $("aireview").onclick = aiReview;
   if ($("dirsbox")) $("dirsbox").ontoggle = e => dirsOpen = e.target.open;
-  box.querySelectorAll("[data-ex]").forEach(el => el.onclick = () => {
-    const list = getExclude(r.folder);
-    if (!list.includes(el.dataset.ex)) list.push(el.dataset.ex);
-    setExclude(r.folder, list); scanFolder(r.folder);
+  box.querySelectorAll("[data-ex]").forEach(el => el.onclick = async () => {
+    await setExclude(r.folder, [...(r.exclude || []), el.dataset.ex]); scanFolder(r.folder, true);
   });
-  box.querySelectorAll("[data-unex]").forEach(el => el.onclick = () => {
-    setExclude(r.folder, getExclude(r.folder).filter(d => d !== el.dataset.unex)); scanFolder(r.folder);
+  box.querySelectorAll("[data-unex]").forEach(el => el.onclick = async () => {
+    await setExclude(r.folder, (r.exclude || []).filter(d => d !== el.dataset.unex)); scanFolder(r.folder, true);
   });
+  box.querySelectorAll("[data-mode]").forEach(el => el.onclick = () => aiReview(el.dataset.mode));
 }
 $("openfolder").onclick = () => scanFolder();
 
@@ -355,29 +376,76 @@ $("openfolder").onclick = () => scanFolder();
 const SEV = {high: "🔴 严重", medium: "🟠 中等", low: "🟡 轻微"};
 const CAT = {bug: "逻辑错误", security: "安全", performance: "性能", error_handling: "错误处理",
              structure: "结构", readability: "可读性"};
-async function aiReview() {
+async function aiReview(mode) {
   const box = $("folderai"), path = lastFolder;
   if (!path) return;
+  const recheck = mode === "recheck";
   try {
-    const exclude = getExclude(path);
-    const plan = await post("/api/fs/ai_plan", {path, exclude});
+    const plan = await post("/api/fs/ai_plan", {path});
     if (plan.error) throw new Error(plan.error);
     const words = plan.chars > 10000 ? Math.round(plan.chars / 1000) + " 千" : plan.chars;
-    let msg = `AI 将阅读 ${plan.files} 个文件（约 ${words} 个字符），大约需要 1~3 分钟，会使用你的 Claude 额度。`;
+    let msg = (recheck ? `AI 会对照上次（${plan.last_review.time}）的 ${plan.last_review.issues} 个问题，逐条检查有没有解决，并看看修改有没有带来新问题。\n\n` : "")
+      + `AI 将阅读 ${plan.files} 个文件（约 ${words} 个字符），大约需要 1~3 分钟，会使用你的 Claude 额度。`;
     if (plan.skipped.length) msg += `\n\n文件比较多，有 ${plan.skipped.length} 个文件超出一次能审查的篇幅，这次不会审查（有错误的文件会优先审查）。\n如果里面有不需要审查的文件夹，可以先在报告里点“排除”。`;
     if (!confirm(msg + "\n\n确定开始吗？")) return;
     box.style.display = "";
-    box.innerHTML = `<p><span class="spinner"></span> AI 正在阅读 ${plan.files} 个文件并审查，大约需要 1~3 分钟…</p>`;
+    box.innerHTML = `<p><span class="spinner"></span> AI 正在${recheck ? "复查" : "阅读"} ${plan.files} 个文件，大约需要 1~3 分钟…</p>`;
     box.scrollIntoView({behavior: "smooth", block: "start"});
-    $("aireview").disabled = true;
+    document.querySelectorAll("[data-mode]").forEach(b => b.disabled = true);
     const ai = $("ai").value === "none" ? "auto" : $("ai").value;
-    const d = await post("/api/fs/ai_review", {path, exclude, ai, explain_lang: $("explain").value});
+    const d = await post(recheck ? "/api/fs/ai_recheck" : "/api/fs/ai_review", {path, ai, explain_lang: $("explain").value});
     if (d.error) throw new Error(d.error);
-    renderReview(d);
+    recheck ? renderRecheck(d) : renderReview(d);
+    scanFolder(path, true);  // 刷新按钮上的“还有几个问题”
   } catch (e) {
     box.style.display = "";
-    box.innerHTML = '<p style="color:var(--err)">AI 审查失败：' + esc(e.message) + '</p>';
-  } finally { if ($("aireview")) $("aireview").disabled = false; }
+    box.innerHTML = '<p style="color:var(--err)">AI ' + (recheck ? "复查" : "审查") + '失败：' + esc(e.message) + '</p>';
+  } finally { document.querySelectorAll("[data-mode]").forEach(b => b.disabled = false); }
+}
+const STATUS = {fixed: "✅ 已解决", partial: "⚠️ 部分解决", not_fixed: "❌ 未解决", unclear: "❔ 无法判断"};
+function issueCard(i, k, extra) {
+  const where = esc(i.file) + (i.line ? ` 第 ${i.line} 行` : "");
+  return `<div class="rv ${extra || i.severity}">
+    <div class="t">${k}. ${esc(i.title)}</div>
+    <div class="meta">${SEV[i.severity] || ""} · <span class="tag">${CAT[i.category] || i.category}</span> ·
+      ${i.path ? `<a data-open="${esc(i.path)}" data-line="${i.line || 0}">📄 ${where}</a>` : where}</div>
+    <div class="txt">${esc(i.explanation)}</div>
+    <div class="lbl">怎么改</div><div class="txt">${esc(i.suggestion)}</div>
+  </div>`;
+}
+function renderRecheck(d) {
+  const box = $("folderai"), c = d.counts, total = d.previous.length;
+  const allFixed = c.fixed === total && !d.new_issues.length;
+  let h = `<h2>🤖 AI 复查报告 <span class="badge ${allFixed ? "ok" : "bad"}">${c.fixed} / ${total} 已解决</span></h2>
+    <div class="bar"><i style="width:${total ? Math.round(c.fixed / total * 100) : 0}%"></i></div>
+    <p class="muted" style="font-size:13px;margin:0 0 6px">对比的是上次 AI 审查（${esc(d.last_time)}）：
+      ✅ 已解决 ${c.fixed} · ⚠️ 部分解决 ${c.partial} · ❌ 未解决 ${c.not_fixed}${c.unclear ? ` · ❔ 无法判断 ${c.unclear}` : ""}
+      · 🆕 新问题 ${d.new_issues.length}</p>
+    <p style="margin:0 0 8px">${esc(d.overview)}</p>`;
+  if (allFixed) h += `<p style="color:var(--ok);font-weight:600">🎉 上次的问题都解决了，也没有发现新问题！</p>`;
+  const order = {not_fixed: 0, partial: 1, unclear: 2, fixed: 3};
+  const prev = d.previous.map((i, k) => ({...i, k: k + 1})).sort((a, b) => order[a.status] - order[b.status]);
+  h += `<h2>上次的问题</h2>`;
+  prev.forEach(i => {
+    const where = esc(i.file) + (i.line ? ` 第 ${i.line} 行` : "");
+    h += `<div class="rv ${i.status === "fixed" ? "fixed" : i.severity}">
+      <div class="t"><span class="st ${i.status}">${STATUS[i.status]}</span> ${i.k}. ${esc(i.title)}</div>
+      <div class="meta">${SEV[i.severity] || ""} · ${i.path ? `<a data-open="${esc(i.path)}" data-line="${i.line || 0}">📄 ${where}</a>` : where}</div>
+      <div class="txt">${esc(i.note)}</div>
+      ${i.status !== "fixed" ? `<details><summary class="lbl" style="cursor:pointer">上次的说明和建议</summary>
+        <div class="txt">${esc(i.explanation)}</div><div class="lbl">怎么改</div><div class="txt">${esc(i.suggestion)}</div></details>` : ""}
+    </div>`;
+  });
+  if (d.new_issues.length) {
+    h += `<h2>🆕 新发现的问题</h2>`;
+    d.new_issues.forEach((i, k) => h += issueCard(i, k + 1));
+  }
+  if (d.next_steps.length) h += `<h2>👉 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
+  h += `<p class="muted" style="font-size:12.5px">没解决的问题和新问题已经记下来了，改完后可以再点“AI 复查”。</p>`;
+  box.innerHTML = h;
+  box.querySelectorAll("[data-open]").forEach(el => el.onclick = e => {
+    e.preventDefault(); openFile(el.dataset.open, +el.dataset.line || 0);
+  });
 }
 function renderReview(d) {
   const box = $("folderai");

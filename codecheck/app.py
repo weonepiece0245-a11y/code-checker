@@ -156,7 +156,10 @@ def _run_webview(port: int) -> bool:
                               "<br><br>请把这个窗口截图发给 Claude。</body>")
                 _mark_ready()
 
-        webview.start(boot)
+        try:
+            webview.start(boot, private_mode=False, storage_path=str(ROOT / ".userdata" / "webview"))
+        except TypeError:  # 旧版 pywebview 没有这些参数
+            webview.start(boot)
         return True
     except Exception as e:
         print("窗口模式启动失败：", repr(e))
