@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, asdict
 
 from .languages import Language
+from .proc import NO_WINDOW, console_python
 
 
 @dataclass
@@ -75,10 +76,11 @@ def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: in
               extra_args: list | None = None) -> RunResult:
     cmd = [part.replace("{file}", path) for part in lang.run_cmd] + list(extra_args or [])
     if cmd[0] == "python3":
-        cmd[0] = sys.executable
+        cmd[0] = console_python()
     env = _clean_env(os.path.dirname(path))
     start = time.monotonic()
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            creationflags=NO_WINDOW,
                             cwd=os.path.dirname(path), env=env, text=True, encoding="utf-8",
                             errors="replace", preexec_fn=_limits(lang.key, timeout, memory_mb))
     timed_out = False
@@ -113,6 +115,7 @@ def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: i
     start = time.monotonic()
     try:
         p = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=timeout + 15,
+                           creationflags=NO_WINDOW,
                            encoding="utf-8", errors="replace")
         dur = int((time.monotonic() - start) * 1000)
         if p.returncode == 125:

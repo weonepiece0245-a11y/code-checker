@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import tempfile
 
+from .proc import NO_WINDOW
+
 MODEL = os.environ.get("CODECHECK_MODEL", "claude-opus-5-5")
 
 SYSTEM_PROMPT = """你是一位耐心、严谨的编程老师和代码审查员。
@@ -131,7 +133,7 @@ def _via_cli(system: str, user: str) -> str:
         # 去掉 API key 环境变量，确保 Claude Code 走订阅额度而不是按 API 计费
         env = {k: v for k, v in os.environ.items()
                if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
-        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=300,
+        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW,
                            encoding="utf-8", errors="replace", env=env)
     except subprocess.TimeoutExpired:
         raise RuntimeError("Claude Code 响应超时") from None
@@ -197,7 +199,7 @@ def _structured_cli(system: str, user: str, schema: dict) -> dict:
         cmd += ["--model", MODEL]
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     try:
-        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=400,
+        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=400, creationflags=NO_WINDOW,
                            encoding="utf-8", errors="replace", env=env)
     except subprocess.TimeoutExpired:
         raise RuntimeError("Claude Code 响应超时") from None

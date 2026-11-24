@@ -7,19 +7,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CORE = ["fastapi", "uvicorn", "anthropic", "ruff", "pydantic"]
 WEBVIEW_FAILED = ROOT / ".webview_failed"
-NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
-
-
-def _python() -> str:
-    # pythonw 运行 pip 也可以，但用 python.exe 更稳；配合 CREATE_NO_WINDOW 不会弹黑窗口
-    p = Path(sys.executable)
-    if p.name.lower() == "pythonw.exe" and p.with_name("python.exe").exists():
-        return str(p.with_name("python.exe"))
-    return sys.executable
+from .proc import NO_WINDOW, console_python
 
 
 def _pip(args: list, quiet: bool) -> tuple[int, str]:
-    cmd = [_python(), "-m", "pip", "install", "--disable-pip-version-check", *args]
+    cmd = [console_python(), "-m", "pip", "install", "--disable-pip-version-check", *args]
     if not quiet:
         return subprocess.call(cmd), ""
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",

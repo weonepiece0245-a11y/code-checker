@@ -35,8 +35,7 @@ def refresh_shortcut():
         return
     try:
         subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                        str(ROOT / "create_shortcut.ps1"), "-Target", pythonw(),
-                        "-Arguments", "-m codecheck.launcher"],
+                        str(ROOT / "create_shortcut.ps1"), "-PythonW", pythonw()],
                        cwd=ROOT, creationflags=NO_WINDOW, timeout=30,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
