@@ -146,6 +146,7 @@ def fs_pick(req: PickRequest):
 
 class PathRequest(BaseModel):
     path: str
+    exclude: list[str] = []
 
 
 @app.post("/api/fs/read")
@@ -174,7 +175,7 @@ def fs_save(req: SaveRequest):
 @app.post("/api/fs/ai_plan")
 def fs_ai_plan(req: PathRequest):
     try:
-        p = folder_ai.plan(req.path)
+        p = folder_ai.plan(req.path, exclude=req.exclude)
         return {"files": len(p["included"]), "chars": p["chars"], "skipped": p["skipped"],
                 "total": p["scan"]["total"]}
     except Exception as e:
@@ -183,6 +184,7 @@ def fs_ai_plan(req: PathRequest):
 
 class AIReviewRequest(BaseModel):
     path: str
+    exclude: list[str] = []
     ai: str = "auto"
     explain_lang: str = "简体中文"
 
@@ -190,7 +192,8 @@ class AIReviewRequest(BaseModel):
 @app.post("/api/fs/ai_review")
 def fs_ai_review(req: AIReviewRequest):
     try:
-        return folder_ai.review(req.path, req.explain_lang, "auto" if req.ai == "none" else req.ai)
+        return folder_ai.review(req.path, req.explain_lang, "auto" if req.ai == "none" else req.ai,
+                                req.exclude)
     except Exception as e:
         return {"error": str(e)}
 
@@ -198,7 +201,7 @@ def fs_ai_review(req: AIReviewRequest):
 @app.post("/api/fs/scan")
 def fs_scan(req: PathRequest):
     try:
-        return folder.scan(req.path)
+        return folder.scan(req.path, req.exclude)
     except Exception as e:
         return {"error": str(e)}
 

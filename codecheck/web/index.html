@@ -84,6 +84,12 @@ button.second{background:transparent;color:var(--accent);border:1px solid var(--
 .rv .txt{font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}
 .tag{font-size:12px;padding:0 6px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
 button.ai{background:linear-gradient(90deg,#2563eb,#7c3aed)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;border:1px solid var(--line);border-radius:99px;padding:2px 4px 2px 10px;background:var(--code)}
+.chip code{font-size:12.5px;overflow-wrap:anywhere}
+.chip button{background:transparent;color:var(--err);border:0;padding:0 6px;font-size:12px;cursor:pointer}
+.chip.ex{opacity:.75;text-decoration:line-through}
+.chip.ex button{color:var(--accent);text-decoration:none}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -257,6 +263,13 @@ document.addEventListener("keydown", e => {
 window.addEventListener("beforeunload", e => { if (isDirty()) { e.preventDefault(); e.returnValue = ""; } });
 
 // ---------- 检查文件夹 ----------
+let dirsOpen = false;  // 记住“各文件夹的文件数”是否展开
+function getExclude(path) {
+  try { return JSON.parse(localStorage.getItem("exclude:" + path) || "[]"); } catch { return []; }
+}
+function setExclude(path, list) {
+  try { localStorage.setItem("exclude:" + path, JSON.stringify(list)); } catch {}
+}
 async function scanFolder(path, quiet) {
   const box = $("folderout");
   try {
@@ -269,7 +282,7 @@ async function scanFolder(path, quiet) {
     lastFolder = path;
     box.style.display = "";
     if (!quiet) box.innerHTML = '<p><span class="spinner"></span> 正在检查文件夹里的所有代码文件…</p>';
-    const r = await post("/api/fs/scan", {path});
+    const r = await post("/api/fs/scan", {path, exclude: getExclude(path)});
     if (r.error) throw new Error(r.error);
     renderFolder(r);
   } catch (e) {
@@ -285,7 +298,20 @@ function renderFolder(r) {
   let h = `<h2>📁 文件夹检查 <span class="badge ${r.with_errors ? "bad" : "ok"}">${r.with_errors ? r.with_errors + " 个文件有错误" : "没有错误"}</span></h2>`;
   h += `<p class="muted" style="margin:0 0 6px;overflow-wrap:anywhere">${esc(r.folder)}<br>共 ${r.total} 个代码文件`
      + (r.with_warnings ? `，${r.with_warnings} 个只有警告` : "") + `。只做了静态检查，没有运行这些文件。点问题可以打开文件并跳到那一行。</p>`;
-  if (r.truncated) h += `<p style="color:var(--warn);font-size:13px">文件太多，只检查了前 500 个。</p>`;
+  if (r.truncated) h += `<p style="color:var(--warn);font-size:13px">文件太多，只检查了前 500 个。可以在下面排除一些文件夹。</p>`;
+  const sk = r.skipped || {}, auto = [];
+  if ((sk.browser_profiles || []).length) auto.push(`浏览器配置文件夹 ${sk.browser_profiles.length} 个`);
+  if (sk.generated) auto.push(`压缩/打包生成的文件 ${sk.generated} 个`);
+  if (sk.gitignored) auto.push(`.gitignore 忽略的文件 ${sk.gitignored} 个`);
+  if (auto.length) h += `<p class="muted" style="font-size:13px;margin:0 0 6px">已自动跳过（不是你写的代码）：${auto.join("、")}
+      ${(sk.browser_profiles || []).length ? `<br><span style="overflow-wrap:anywhere">浏览器配置：${sk.browser_profiles.map(esc).join("、")}</span>` : ""}</p>`;
+  const ex = r.exclude || [];
+  if ((r.dirs || []).length || ex.length) {
+    h += `<details id="dirsbox" ${ex.length || dirsOpen ? "open" : ""}><summary class="muted" style="cursor:pointer;font-size:13px">各文件夹的文件数（点“排除”就不再检查那个文件夹）</summary><div class="chips">`;
+    ex.forEach(d => h += `<span class="chip ex"><code>${esc(d)}</code><button data-unex="${esc(d)}">恢复</button></span>`);
+    (r.dirs || []).forEach(d => h += `<span class="chip"><code>${esc(d.dir)}</code> ${d.files} 个<button data-ex="${esc(d.dir)}">排除</button></span>`);
+    h += `</div></details>`;
+  }
   r.notes.forEach(n => h += `<p style="color:var(--warn);font-size:13px">${esc(n)}</p>`);
   h += `<div class="row" style="margin:4px 0">${r.total ? '<button class="ai" id="aireview">🤖 AI 审查整个文件夹</button>' : ""}
         <button class="ghost" id="rescan">重新检查文件夹</button><button class="ghost" id="closefolder">关闭</button></div>`;
@@ -313,6 +339,15 @@ function renderFolder(r) {
   $("rescan").onclick = () => scanFolder(lastFolder);
   $("closefolder").onclick = () => { box.style.display = "none"; $("folderai").style.display = "none"; lastFolder = null; };
   if ($("aireview")) $("aireview").onclick = aiReview;
+  if ($("dirsbox")) $("dirsbox").ontoggle = e => dirsOpen = e.target.open;
+  box.querySelectorAll("[data-ex]").forEach(el => el.onclick = () => {
+    const list = getExclude(r.folder);
+    if (!list.includes(el.dataset.ex)) list.push(el.dataset.ex);
+    setExclude(r.folder, list); scanFolder(r.folder);
+  });
+  box.querySelectorAll("[data-unex]").forEach(el => el.onclick = () => {
+    setExclude(r.folder, getExclude(r.folder).filter(d => d !== el.dataset.unex)); scanFolder(r.folder);
+  });
 }
 $("openfolder").onclick = () => scanFolder();
 
@@ -324,18 +359,19 @@ async function aiReview() {
   const box = $("folderai"), path = lastFolder;
   if (!path) return;
   try {
-    const plan = await post("/api/fs/ai_plan", {path});
+    const exclude = getExclude(path);
+    const plan = await post("/api/fs/ai_plan", {path, exclude});
     if (plan.error) throw new Error(plan.error);
     const words = plan.chars > 10000 ? Math.round(plan.chars / 1000) + " 千" : plan.chars;
     let msg = `AI 将阅读 ${plan.files} 个文件（约 ${words} 个字符），大约需要 1~3 分钟，会使用你的 Claude 额度。`;
-    if (plan.skipped.length) msg += `\n\n文件比较多，有 ${plan.skipped.length} 个文件超出一次能审查的篇幅，这次不会审查（有错误的文件会优先审查）。`;
+    if (plan.skipped.length) msg += `\n\n文件比较多，有 ${plan.skipped.length} 个文件超出一次能审查的篇幅，这次不会审查（有错误的文件会优先审查）。\n如果里面有不需要审查的文件夹，可以先在报告里点“排除”。`;
     if (!confirm(msg + "\n\n确定开始吗？")) return;
     box.style.display = "";
     box.innerHTML = `<p><span class="spinner"></span> AI 正在阅读 ${plan.files} 个文件并审查，大约需要 1~3 分钟…</p>`;
     box.scrollIntoView({behavior: "smooth", block: "start"});
     $("aireview").disabled = true;
     const ai = $("ai").value === "none" ? "auto" : $("ai").value;
-    const d = await post("/api/fs/ai_review", {path, ai, explain_lang: $("explain").value});
+    const d = await post("/api/fs/ai_review", {path, exclude, ai, explain_lang: $("explain").value});
     if (d.error) throw new Error(d.error);
     renderReview(d);
   } catch (e) {
@@ -364,8 +400,13 @@ function renderReview(d) {
   });
   if (d.strengths.length) h += `<h2>👍 写得好的地方</h2><ul>${d.strengths.map(s => `<li>${esc(s)}</li>`).join("")}</ul>`;
   if (d.next_steps.length) h += `<h2>👉 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
-  if (d.skipped.length) h += `<details><summary class="muted" style="cursor:pointer;font-size:13px">没有审查的文件（${d.skipped.length} 个）</summary>
-      <div class="muted" style="font-size:12.5px;overflow-wrap:anywhere">${d.skipped.map(esc).join("<br>")}</div></details>`;
+  if (d.skipped.length) {
+    const groups = d.skipped_groups || [{dir: "", files: d.skipped.length}];
+    h += `<details><summary class="muted" style="cursor:pointer;font-size:13px">因为篇幅限制没有审查的文件（${d.skipped.length} 个，按文件夹统计）</summary>
+      <div class="muted" style="font-size:12.5px;overflow-wrap:anywhere;margin-top:4px">
+      ${groups.map(g => `<div><code>${esc(g.dir)}</code>：${g.files} 个</div>`).join("")}
+      <p style="margin:6px 0 0">想审查这些文件：在上面的文件夹报告里排除不需要的文件夹，或者直接选择那个子文件夹来审查。</p></div></details>`;
+  }
   box.innerHTML = h;
   box.querySelectorAll("[data-open]").forEach(el => el.onclick = e => {
     e.preventDefault(); openFile(el.dataset.open, +el.dataset.line || 0);

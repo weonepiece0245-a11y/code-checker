@@ -57,9 +57,9 @@ SYSTEM = """你是一位经验丰富、说话直接但友善的代码审查员�
 """
 
 
-def plan(path: str, scan_result: dict | None = None) -> dict:
+def plan(path: str, scan_result: dict | None = None, exclude: list[str] | None = None) -> dict:
     """决定发送哪些文件：有错误的优先，然后是有警告的，再按文件大小从小到大，直到用完额度。"""
-    r = scan_result or folder.scan(path)
+    r = scan_result or folder.scan(path, exclude)
     included, skipped, used = [], [], 0
     order = sorted(r["files"], key=lambda f: (-f["errors"], -f["warnings"], f["lines"]))
     for f in order:
@@ -85,8 +85,9 @@ def _read(path: str) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def review(path: str, explain_lang: str = "简体中文", backend: str = "auto") -> dict:
-    p = plan(path)
+def review(path: str, explain_lang: str = "简体中文", backend: str = "auto",
+           exclude: list[str] | None = None) -> dict:
+    p = plan(path, exclude=exclude)
     if not p["included"]:
         raise ValueError("这个文件夹里没有可以审查的代码文件")
     parts = [f"项目文件夹：{os.path.basename(p['scan']['folder'])}，共 {p['scan']['total']} 个代码文件，"
@@ -108,7 +109,7 @@ def review(path: str, explain_lang: str = "简体中文", backend: str = "auto")
     order = {"high": 0, "medium": 1, "low": 2}
     data["issues"].sort(key=lambda i: order.get(i["severity"], 3))
     data.update(folder=p["scan"]["folder"], reviewed=[f["rel"] for f in p["included"]],
-                skipped=p["skipped"], ai_backend=used)
+                skipped=p["skipped"], skipped_groups=folder.group_by_dir(p["skipped"]), ai_backend=used)
     return data
 
 
