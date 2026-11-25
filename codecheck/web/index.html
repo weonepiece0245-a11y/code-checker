@@ -14,6 +14,7 @@
     if (window.parent === window) return;
     try { window.parent.postMessage({type: "busy", busy: inflight > 0}, location.origin); } catch {}
   };
+  window.markBusy = d => { inflight += d; notify(); };
   window.fetch = (url, opts = {}) => {
     if (typeof url === "string" && url.startsWith("/api/")) {
       opts = {...opts, headers: {...(opts.headers || {}), "X-Token": TOKEN}};
@@ -447,11 +448,12 @@ function renderFolder(r) {
   let aiBtns = "";
   if (r.total) aiBtns = lr
     ? `<button class="ai" data-mode="recheck">🤖 AI 复查：上次的 ${lr.issues} 个问题解决了吗？</button>
+       ${lr.pending ? `<button class="ai" data-mode="continue">▶ 继续审查剩下的 ${lr.pending} 个文件</button>` : ""}
        <button class="ghost" data-mode="review">重新完整审查</button>`
-    : `<button class="ai" data-mode="review">🤖 AI 审查整个文件夹</button>`;
+    : `<button class="ai" data-mode="review">🤖 AI 审查整个文件夹（全部 ${r.total} 个文件）</button>`;
   h += `<div class="row" style="margin:4px 0">${aiBtns}
         <button class="ghost" id="rescan">重新检查文件夹</button><button class="ghost" id="closefolder">关闭</button></div>`;
-  if (lr) h += `<p class="muted" style="font-size:12.5px;margin:0 0 6px">上次 AI 审查：${esc(lr.time)}，还有 ${lr.issues} 个问题待确认</p>`;
+  if (lr) h += `<p class="muted" style="font-size:12.5px;margin:0 0 6px">上次 AI 审查：${esc(lr.time)}，还有 ${lr.issues} 个问题待确认${lr.pending ? `；${lr.pending} 个文件还没审完` : ""}</p>`;
   if (!r.total) h += `<p class="muted">这个文件夹里没有找到 .py 或 .js 文件。</p>`;
   bad.forEach((f, idx) => {
     h += `<details class="frow ${f.errors ? "err" : "warn"}" ${idx < 5 ? "open" : ""}>
@@ -496,32 +498,97 @@ $("openfolder").onclick = () => scanFolder();
 const SEV = {high: "🔴 严重", medium: "🟠 中等", low: "🟡 轻微"};
 const CAT = {bug: "逻辑错误", security: "安全", performance: "性能", error_handling: "错误处理",
              structure: "结构", readability: "可读性"};
+let currentJob = null;
 async function aiReview(mode) {
   const box = $("folderai"), path = lastFolder;
   if (!path) return;
-  const recheck = mode === "recheck";
+  const name = {review: "审查", recheck: "复查", continue: "继续审查"}[mode];
+  let busy = false;
   try {
-    const plan = await post("/api/fs/ai_plan", {path});
+    const plan = await post("/api/fs/ai_plan", {path, mode});
     if (plan.error) throw new Error(plan.error);
-    const words = plan.chars > 10000 ? Math.round(plan.chars / 1000) + " 千" : plan.chars;
-    let msg = (recheck ? `AI 会对照上次（${plan.last_review.time}）的 ${plan.last_review.issues} 个问题，逐条检查有没有解决，并看看修改有没有带来新问题。\n\n` : "")
-      + `AI 将阅读 ${plan.files} 个文件（约 ${words} 个字符），大约需要 1~3 分钟，会使用你的 Claude 额度。`;
-    if (plan.skipped.length) msg += `\n\n文件比较多，有 ${plan.skipped.length} 个文件超出一次能审查的篇幅，这次不会审查（有错误的文件会优先审查）。\n如果里面有不需要审查的文件夹，可以先在报告里点“排除”。`;
+    const lr = plan.last_review;
+    const kchars = plan.chars > 10000 ? Math.round(plan.chars / 10000) + " 万" : plan.chars;
+    let msg = "";
+    if (mode === "recheck") {
+      msg = `AI 会对照上次（${lr.time}）的 ${lr.issues} 个问题，逐条检查有没有解决，并看看修改有没有带来新问题。\n\n`
+        + (plan.files ? `只重新审查改动过的 ${plan.files} 个文件` : "没有文件改动过，不需要调用 AI")
+        + (plan.unchanged ? `；没改动的 ${plan.unchanged} 个文件跳过（里面的问题直接算“未解决”）。` : "。");
+    } else if (mode === "continue") {
+      msg = `接着审查上次没审完的 ${plan.files} 个文件，结果会并进上次的报告。`;
+    } else {
+      msg = `AI 将审查全部 ${plan.files} 个文件（约 ${kchars} 个字符）。`;
+    }
+    if (plan.batches > 1) {
+      const lo = Math.ceil(plan.batches / 3) * 2, hi = Math.ceil(plan.batches / 3) * 4;
+      msg += `\n\n文件比较多，会分 ${plan.batches} 批审查（最多同时进行 3 批），大约需要 ${lo}~${hi} 分钟，`
+        + `会用掉较多 Claude 额度（大约相当于 ${plan.batches} 次审查）。`
+        + `\n如果中途额度用完，已经审完的部分会保存下来，之后可以点“继续审查”接着审。`
+        + `\n不需要审查的文件夹，可以先在报告里点“排除”。`;
+    } else if (plan.files) {
+      msg += "\n\n大约需要 1~3 分钟，会使用你的 Claude 额度。";
+    }
     if (!confirm(msg + "\n\n确定开始吗？")) return;
+
     showView("folderai"); setBadge("folderai", "spin");
-    box.innerHTML = `<p><span class="spinner"></span> AI 正在${recheck ? "复查" : "阅读"} ${plan.files} 个文件，大约需要 1~3 分钟…</p>
-      <p class="muted" style="font-size:13px">等待的时候可以切到别的标签页做其他检查。</p>`;
     document.querySelectorAll("[data-mode]").forEach(b => b.disabled = true);
+    window.markBusy(1); busy = true;
     const ai = $("ai").value === "none" ? "auto" : $("ai").value;
-    const d = await post(recheck ? "/api/fs/ai_recheck" : "/api/fs/ai_review", {path, ai, explain_lang: $("explain").value});
-    if (d.error) throw new Error(d.error);
-    recheck ? renderRecheck(d) : renderReview(d);
+    const start = await post("/api/fs/ai_job", {path, mode, ai, explain_lang: $("explain").value});
+    if (start.error) throw new Error(start.error);
+    currentJob = start.job;
+    const total = Math.max(plan.batches, 1);
+    const draw = (done, t, sec, note) => {
+      const pct = t ? Math.round(done / t * 100) : 0;
+      box.innerHTML = `<h2>🤖 AI 正在${name}…</h2>
+        <div class="bar"><i style="width:${pct}%"></i></div>
+        <p style="margin:4px 0">${t > 1 ? `已完成 <b>${done} / ${t}</b> 批` : "正在审查"}（${plan.files} 个文件）
+          · 已用 ${Math.floor(sec / 60)} 分 ${sec % 60} 秒 <span class="spinner"></span></p>
+        <p class="muted" style="font-size:13px">${note || "等待的时候可以切到别的标签页做其他检查。"}</p>
+        <button class="ghost" id="canceljob">取消</button>`;
+      $("canceljob").onclick = async () => {
+        await post(`/api/jobs/${currentJob}/cancel`, {});
+        $("canceljob").disabled = true;
+        box.querySelector("p.muted").textContent = "正在取消：等正在进行的几批结束（已经审完的部分会保存）…";
+      };
+    };
+    draw(0, total, 0);
+    let d;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 2000));
+      const st = await (await fetch(`/api/jobs/${currentJob}`, {cache: "no-store"})).json();
+      if (st.status === "running") { draw(st.done, st.total || total, st.elapsed); continue; }
+      if (st.status === "done") { d = st.result; break; }
+      throw new Error(st.status === "cancelled" ? "已取消。已经审完的部分已保存，可以点“继续审查”接着审。" : (st.error || "未知错误"));
+    }
+    mode === "recheck" ? renderRecheck(d) : renderReview(d);
     markNew("folderai");
     scanFolder(path, true);  // 刷新按钮上的“还有几个问题”
   } catch (e) {
     setBadge("folderai", "bad", "!");
-    box.innerHTML = '<p style="color:var(--err)">AI ' + (recheck ? "复查" : "审查") + '失败：' + esc(e.message) + '</p>';
-  } finally { document.querySelectorAll("[data-mode]").forEach(b => b.disabled = false); }
+    box.innerHTML = `<p style="color:var(--err)">AI ${name}没有完成：${esc(e.message)}</p>`;
+    scanFolder(path, true);
+  } finally {
+    if (busy) window.markBusy(-1);
+    currentJob = null;
+    document.querySelectorAll("[data-mode]").forEach(b => b.disabled = false);
+  }
+}
+// 报告底部：没审完的文件 + “继续审查”按钮（审查和复查报告共用）
+function pendingBox(d) {
+  let h = "";
+  if ((d.failed_batches || []).length) {
+    h += `<div class="cmp" style="border-color:var(--warn)">⚠️ 有 ${d.failed_batches.length} 批没审完：
+      ${d.failed_batches.slice(0, 3).map(f => `<div class="it">第 ${f.index} 批：${esc(f.error)}</div>`).join("")}</div>`;
+  }
+  if ((d.pending || []).length) {
+    h += `<details open><summary style="cursor:pointer;font-weight:600;margin:8px 0 4px">还没审查的文件（${d.pending.length} 个）</summary>
+      <div class="muted" style="font-size:12.5px;overflow-wrap:anywhere">
+      ${(d.pending_groups || []).map(g => `<div><code>${esc(g.dir)}</code>：${g.files} 个</div>`).join("")}</div>
+      <p style="margin:6px 0"><button class="ai" data-mode="continue">▶ 继续审查剩下的 ${d.pending.length} 个文件</button></p>
+      <p class="muted" style="font-size:12.5px;margin:0">如果是 Claude 额度用完了，等额度恢复后再点。</p></details>`;
+  }
+  return h;
 }
 const STATUS = {fixed: "✅ 已解决", partial: "⚠️ 部分解决", not_fixed: "❌ 未解决", unclear: "❔ 无法判断"};
 function issueCard(i, k, extra) {
@@ -545,6 +612,7 @@ function addFilters(box, html) {
   box.querySelectorAll("[data-open]").forEach(el => el.onclick = e => {
     e.preventDefault(); openFile(el.dataset.open, +el.dataset.line || 0);
   });
+  box.querySelectorAll("[data-mode]").forEach(el => el.onclick = () => aiReview(el.dataset.mode));
 }
 function filterBar(list) {
   const n = s => list.filter(i => i.severity === s).length;
@@ -564,7 +632,8 @@ function renderRecheck(d) {
       <span class="stat" style="color:var(--err)"><b>${c.not_fixed}</b> 未解决</span>
       ${c.unclear ? `<span class="stat"><b>${c.unclear}</b> 无法判断</span>` : ""}
       <span class="stat" style="color:var(--accent)"><b>${d.new_issues.length}</b> 新问题</span></div>
-    <p class="muted" style="font-size:12.5px;margin:0 0 4px">对比的是上次 AI 审查（${esc(d.last_time)}）</p>
+    <p class="muted" style="font-size:12.5px;margin:0 0 4px">对比的是上次 AI 审查（${esc(d.last_time)}）。
+      重新审查了 ${d.reviewed.length} 个改动过的文件${d.unchanged ? `，${d.unchanged} 个没改动的文件跳过` : ""}${d.batches > 1 ? `（分 ${d.batches} 批）` : ""}。</p>
     <p style="margin:0 0 8px">${esc(d.overview)}</p>`;
   if (allFixed) h += `<p style="color:var(--ok);font-weight:600">🎉 上次的问题都解决了，也没有发现新问题！</p>`;
   const card = i => {
@@ -585,6 +654,7 @@ function renderRecheck(d) {
   if (d.new_issues.length) h += `<h2>🆕 新发现的问题（${d.new_issues.length}）</h2>` + d.new_issues.map((i, k) => issueCard(i, k + 1)).join("");
   if (done.length) h += `<details ${todo.length ? "" : "open"}><summary style="cursor:pointer;font-weight:600;margin:10px 0 4px">✅ 已解决（${done.length}）</summary>${done.map(card).join("")}</details>`;
   if (d.next_steps.length) h += `<h2>👉 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
+  h += pendingBox(d);
   h += `<p class="muted" style="font-size:12.5px">没解决的问题和新问题已经记下来了，改完后可以再点“AI 复查”。</p>`;
   addFilters(box, h);
 }
@@ -596,19 +666,13 @@ function renderReview(d) {
     <div class="stats"><span class="stat" style="color:var(--err)"><b>${n("high")}</b> 严重</span>
       <span class="stat" style="color:#ea580c"><b>${n("medium")}</b> 中等</span>
       <span class="stat" style="color:var(--warn)"><b>${n("low")}</b> 轻微</span>
-      <span class="stat"><b>${d.reviewed.length}</b> 个文件已审查</span></div>
+      <span class="stat"><b>${d.reviewed.length}</b> 个文件已审查${d.batches > 1 ? `（分 ${d.batches} 批）` : ""}</span></div>
     <details open><summary class="muted" style="cursor:pointer;font-size:13px">项目概况</summary><p style="margin:4px 0 8px">${esc(d.overview)}</p></details>`;
   if (!d.issues.length) h += `<p style="color:var(--ok)">✓ AI 没有发现值得报告的问题。</p>`;
   else h += filterBar(d.issues) + d.issues.map((i, k) => issueCard(i, k + 1)).join("");
   if (d.next_steps.length) h += `<h2>👉 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
   if (d.strengths.length) h += `<details><summary class="muted" style="cursor:pointer">👍 写得好的地方（${d.strengths.length}）</summary><ul>${d.strengths.map(s => `<li>${esc(s)}</li>`).join("")}</ul></details>`;
-  if (d.skipped.length) {
-    const groups = d.skipped_groups || [{dir: "", files: d.skipped.length}];
-    h += `<details><summary class="muted" style="cursor:pointer;font-size:13px">因为篇幅限制没有审查的文件（${d.skipped.length} 个）</summary>
-      <div class="muted" style="font-size:12.5px;overflow-wrap:anywhere;margin-top:4px">
-      ${groups.map(g => `<div><code>${esc(g.dir)}</code>：${g.files} 个</div>`).join("")}
-      <p style="margin:6px 0 0">想审查这些文件：在“文件夹”标签里排除不需要的文件夹，或者直接选择那个子文件夹来审查。</p></div></details>`;
-  }
+  h += pendingBox(d);
   addFilters(box, h);
 }
 

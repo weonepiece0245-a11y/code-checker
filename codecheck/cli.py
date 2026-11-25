@@ -89,8 +89,11 @@ def _folder_mode(a) -> int:
             continue
         if not a.json:
             print(color(f"\n━━ {title}（可能需要 1~3 分钟）━━", "bold"))
+        def progress(done, total):
+            if total > 1:
+                print(f"  已完成 {done}/{total} 批", file=sys.stderr, flush=True)
         try:
-            data = run(a.file, a.explain_lang, _ai(a))
+            data = run(a.file, a.explain_lang, _ai(a), progress=progress)
             r[key] = data
             if not a.json:
                 print(fmt(data))

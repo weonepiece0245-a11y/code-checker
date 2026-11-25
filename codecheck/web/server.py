@@ -245,14 +245,20 @@ def fs_exclude(req: ExcludeRequest):
     return {"ok": True}
 
 
+ReviewMode = Literal["review", "recheck", "continue"]
+
+
+class AIPlanRequest(BaseModel):
+    path: str
+    exclude: list[str] | None = None
+    mode: ReviewMode = "review"
+
+
 @app.post("/api/fs/ai_plan")
-def fs_ai_plan(req: PathRequest):
+def fs_ai_plan(req: AIPlanRequest):
+    """开始前预览：要审查多少文件、分几批、大约多少字符。"""
     try:
-        p = folder_ai.plan(req.path, exclude=_exclude(req), read=False)  # 只估算，不读文件
-        last = folder_ai.last_review(req.path)
-        return {"files": len(p["included"]), "chars": p["chars"], "skipped": p["skipped"],
-                "last_review": {"time": last["time"], "issues": len(last["issues"])} if last else None,
-                "total": p["scan"]["total"]}
+        return folder_ai.preview(req.path, req.mode, _exclude(req))
     except Exception as e:
         return {"error": str(e)}
 
@@ -262,24 +268,80 @@ class AIReviewRequest(BaseModel):
     exclude: list[str] | None = None
     ai: AIBackend = "auto"
     explain_lang: ExplainLang = "简体中文"
+    mode: ReviewMode = "review"
+
+
+def _run_review(req: "AIReviewRequest", progress=None, cancel=None) -> dict:
+    ai_backend = "auto" if req.ai == "none" else req.ai
+    if req.mode == "recheck":
+        return folder_ai.recheck(req.path, req.explain_lang, ai_backend, _exclude(req), progress, cancel)
+    return folder_ai.review(req.path, req.explain_lang, ai_backend, _exclude(req), progress, cancel, mode=req.mode)
 
 
 @app.post("/api/fs/ai_review")
 def fs_ai_review(req: AIReviewRequest):
     try:
-        return folder_ai.review(req.path, req.explain_lang, "auto" if req.ai == "none" else req.ai,
-                                _exclude(req))
+        return _run_review(req)
     except Exception as e:
         return {"error": str(e)}
 
 
 @app.post("/api/fs/ai_recheck")
 def fs_ai_recheck(req: AIReviewRequest):
-    try:
-        return folder_ai.recheck(req.path, req.explain_lang, "auto" if req.ai == "none" else req.ai,
-                                 _exclude(req))
-    except Exception as e:
-        return {"error": str(e)}
+    req.mode = "recheck"
+    return fs_ai_review(req)
+
+
+# ---------- 后台任务：分批审查可能要十几分钟，网页定时来问进度 ----------
+
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
+
+
+@app.post("/api/fs/ai_job")
+def fs_ai_job(req: AIReviewRequest):
+    job_id = secrets.token_hex(8)
+    job = {"status": "running", "done": 0, "total": 0, "result": None, "error": None,
+           "cancel": threading.Event(), "started": time.time()}
+    with JOBS_LOCK:
+        finished = [k for k, v in JOBS.items() if v["status"] != "running"]
+        for k in finished[:-20]:  # 只保留最近 20 个已结束的任务
+            JOBS.pop(k, None)
+        JOBS[job_id] = job
+
+    def progress(done: int, total: int):
+        job["done"], job["total"] = done, total
+
+    def work():
+        try:
+            job["result"] = _run_review(req, progress, job["cancel"])
+            job["status"] = "done"
+        except Exception as e:
+            job["error"] = str(e)
+            job["status"] = "cancelled" if job["cancel"].is_set() else "error"
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"job": job_id}
+
+
+@app.get("/api/jobs/{job_id}")
+def job_status(job_id: str):
+    job = JOBS.get(job_id)
+    if not job:
+        return {"status": "missing", "error": "找不到这个任务（程序可能重启过）"}
+    out = {k: job[k] for k in ("status", "done", "total", "error")}
+    out["elapsed"] = int(time.time() - job["started"])
+    if job["status"] == "done":
+        out["result"] = job["result"]
+    return out
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def job_cancel(job_id: str):
+    job = JOBS.get(job_id)
+    if job:
+        job["cancel"].set()
+    return {"ok": True}
 
 
 @app.post("/api/fs/scan")
@@ -287,7 +349,8 @@ def fs_scan(req: PathRequest):
     try:
         r = folder.scan(req.path, _exclude(req))
         last = folder_ai.last_review(req.path)
-        r["last_review"] = {"time": last["time"], "issues": len(last["issues"])} if last else None
+        r["last_review"] = ({"time": last["time"], "issues": len(last["issues"]),
+                             "pending": len(last.get("pending", []))} if last else None)
         return r
     except Exception as e:
         return {"error": str(e)}
