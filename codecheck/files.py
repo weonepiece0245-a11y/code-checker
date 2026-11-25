@@ -1,10 +1,12 @@
 """打开、保存本机文件，以及弹出“选择文件/文件夹”窗口。"""
+import hashlib
 import os
 import shutil
 import threading
 import time
 from pathlib import Path
 
+from . import textio
 from .folder import EXT
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,18 +56,9 @@ def read(path: str) -> dict:
         raise ValueError("文件不存在")
     if os.path.getsize(path) > MAX_SIZE:
         raise ValueError("文件太大（超过 1MB）")
-    data = Path(path).read_bytes()
-    for enc in ("utf-8-sig", "utf-8", "gbk"):  # 中文 Windows 上老文件常是 GBK
-        try:
-            text = data.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        enc, text = "utf-8", data.decode("utf-8", errors="replace")
-    return {"path": path, "name": os.path.basename(path), "content": text.replace("\r\n", "\n"),
-            "encoding": "utf-8" if enc == "utf-8-sig" and not data.startswith(b"\xef\xbb\xbf") else enc,
-            "crlf": b"\r\n" in data, "language": EXT.get(Path(path).suffix.lower())}
+    ct = textio.read(path)
+    return {"path": path, "name": os.path.basename(path), "content": ct.text, "encoding": ct.encoding,
+            "crlf": ct.crlf, "language": EXT.get(Path(path).suffix.lower())}
 
 
 def save(path: str, content: str, encoding: str = "utf-8", crlf: bool = False) -> dict:
@@ -76,7 +69,14 @@ def save(path: str, content: str, encoding: str = "utf-8", crlf: bool = False) -
     backup = None
     if os.path.isfile(path):  # 覆盖前先备份到程序自己的 .backups 文件夹
         BACKUPS.mkdir(exist_ok=True)
-        backup = BACKUPS / f"{time.strftime('%Y%m%d-%H%M%S')}_{os.path.basename(path)}"
+        # 时间精确到毫秒，再加上所在文件夹的短编号：同一秒保存多次、不同文件夹里的同名文件都不会互相覆盖
+        ms = int(time.time() * 1000) % 1000
+        folder_id = hashlib.sha1(os.path.normcase(os.path.dirname(path)).encode("utf-8")).hexdigest()[:6]
+        backup = BACKUPS / f"{time.strftime('%Y%m%d-%H%M%S')}-{ms:03d}_{folder_id}_{os.path.basename(path)}"
+        n = 1
+        while backup.exists():  # 极少数情况：同一毫秒内又保存了一次
+            backup = backup.with_name(f"{backup.stem}-{n}{backup.suffix}")
+            n += 1
         shutil.copy2(path, backup)
         olds = sorted(BACKUPS.iterdir())
         for old in olds[:-100]:  # 只保留最近 100 份

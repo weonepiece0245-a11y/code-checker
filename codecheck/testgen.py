@@ -132,7 +132,8 @@ def run(code: str, tests: list[dict], language: str | None = None, timeout: int 
     lang = LANGUAGES[language] if language else detect(None, code)
     results = []
     with tempfile.TemporaryDirectory(prefix="codecheck_t_") as tmp:
-        os.chmod(tmp, 0o755)
+        if sandbox == "docker":
+            os.chmod(tmp, 0o755)  # 只有 Docker 里的程序需要读
         main_path = os.path.join(tmp, "main" + lang.suffix)
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(code)

@@ -32,25 +32,18 @@ def _ruff_cmd():
 
 def check_python(path: str) -> list[Issue]:
     issues: list[Issue] = []
-    # 1) 语法检查
+    # 1) 语法检查：只编译不运行（不会执行任何代码）
+    from . import textio
     try:
-        proc = subprocess.run([console_python(), "-I", "-m", "py_compile", path], creationflags=NO_WINDOW,
-                              capture_output=True, text=True, timeout=20,
-                              encoding="utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        proc = None
-        issues.append(Issue(0, 0, "tool", "语法检查超时（文件太大或电脑太忙），跳过了语法检查", "warning"))
-    if proc is not None and proc.returncode != 0:
-        line = 0
-        for part in proc.stderr.split(","):
-            part = part.strip()
-            if part.startswith("line "):
-                try:
-                    line = int(part.split()[1].rstrip(")"))
-                except ValueError:
-                    pass
-        msg = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "语法错误"
-        issues.append(Issue(line, 0, "SyntaxError", msg, "error"))
+        compile(textio.read(path).text, os.path.basename(path), "exec")
+    except SyntaxError as e:  # IndentationError / TabError 也是 SyntaxError
+        kind = {"IndentationError": "缩进错误", "TabError": "缩进里混用了空格和 Tab"}.get(type(e).__name__, "语法错误")
+        issues.append(Issue(e.lineno or 0, e.offset or 0, "SyntaxError",
+                            f"{kind}，代码写法不对，程序无法运行（{e.msg}）", "error"))
+    except (ValueError, RecursionError, MemoryError) as e:
+        issues.append(Issue(0, 0, "SyntaxError", f"代码无法解析（{type(e).__name__}）", "error"))
+    except OSError as e:
+        issues.append(Issue(0, 0, "tool", f"读取文件失败：{e}", "warning"))
     # 2) ruff：常见 bug（未定义变量、未使用导入、可变默认参数等）
     try:
         issues += ruff_many([path], include_syntax=False).get(path, [])
@@ -170,29 +163,41 @@ def ruff_many(paths: list[str], include_syntax: bool = True) -> dict[str, list[I
     return result
 
 
-def check_javascript(path: str) -> list[Issue]:
-    issues: list[Issue] = []
-    if not shutil.which("node"):
-        return [Issue(0, 0, "tool", "没有安装 Node.js，无法检查 JavaScript", "warning")]
+def node_syntax(path: str) -> list[Issue]:
+    """用 node --check 检查 JavaScript 语法（单个文件检查和文件夹检查共用）。"""
     try:
         proc = subprocess.run(["node", "--check", path], creationflags=NO_WINDOW, capture_output=True, text=True,
                               timeout=20, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return [Issue(0, 0, "tool", "语法检查超时（文件太大或电脑太忙），跳过了语法检查", "warning")]
-    if proc.returncode != 0:
-        line = 0
-        first = proc.stderr.splitlines()[0] if proc.stderr else ""
-        if ":" in first:
-            try:
-                line = int(first.rsplit(":", 1)[1])
-            except ValueError:
-                pass
-        msg = next((ln for ln in proc.stderr.splitlines() if "Error" in ln), proc.stderr.strip())
-        issues.append(Issue(line, 0, "SyntaxError", msg.strip(), "error"))
+    except OSError as e:
+        return [Issue(0, 0, "tool", f"没法运行 node：{e}", "warning")]
+    if proc.returncode == 0:
+        return []
+    line = 0
+    first = proc.stderr.splitlines()[0] if proc.stderr else ""
+    if ":" in first:
+        try:
+            line = int(first.rsplit(":", 1)[1])
+        except ValueError:
+            pass
+    msg = next((ln for ln in proc.stderr.splitlines() if "Error" in ln), proc.stderr.strip()[:200])
+    msg = msg.strip().removeprefix("SyntaxError:").strip()
+    return [Issue(line, 0, "SyntaxError", f"语法错误，代码写法不对，程序无法运行（{msg}）", "error")]
+
+
+def check_javascript(path: str) -> list[Issue]:
+    if not shutil.which("node"):
+        return [Issue(0, 0, "tool", "没有安装 Node.js，无法检查 JavaScript", "warning")]
+    issues = node_syntax(path)
     # 如果项目里装了 eslint 就顺便用上
     if shutil.which("eslint"):
-        r = subprocess.run(creationflags=NO_WINDOW, args=[shutil.which("eslint"), "--format", "json", path], capture_output=True, text=True,
-                           timeout=60, encoding="utf-8", errors="replace", env={**os.environ, "ESLINT_USE_FLAT_CONFIG": "true"})
+        try:
+            r = subprocess.run(creationflags=NO_WINDOW, args=[shutil.which("eslint"), "--format", "json", path],
+                               capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace",
+                               env={**os.environ, "ESLINT_USE_FLAT_CONFIG": "true"})
+        except (subprocess.TimeoutExpired, OSError):
+            return issues + [Issue(0, 0, "tool", "eslint 运行失败或超时，跳过了 eslint 检查", "warning")]
         try:
             for f in json.loads(r.stdout or "[]"):
                 for m in f.get("messages", []):

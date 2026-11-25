@@ -9,3 +9,6 @@ app.log
 *.new
 .backups/
 .userdata/
+.manifest
+*.updating
+*.restoring

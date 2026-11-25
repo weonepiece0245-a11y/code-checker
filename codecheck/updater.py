@@ -119,22 +119,92 @@ def apply(source: str, remote: str) -> None:
             compile(py.read_text(encoding="utf-8"), str(py), "exec")
 
         old_req = (ROOT / "requirements.txt").read_bytes() if (ROOT / "requirements.txt").exists() else b""
-        for rel in files:
-            src, target = staged / rel, ROOT / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if rel == LAUNCHER:
-                # 正在运行的 .bat 不能直接覆盖，先存成 .new，由启动器自己替换
-                if not target.exists() or target.read_bytes() != src.read_bytes():
-                    shutil.copyfile(src, ROOT / (LAUNCHER + ".new"))
-                continue
-            tmp_target = target.with_name(target.name + ".updating")
-            shutil.copyfile(src, tmp_target)
-            tmp_target.replace(target)  # 单个文件原子替换，不会出现写了一半的文件
+        _install(staged, files)
         new_req = (ROOT / "requirements.txt").read_bytes() if (ROOT / "requirements.txt").exists() else b""
     if new_req != old_req:
         (ROOT / ".deps_ok").unlink(missing_ok=True)  # 依赖变了，让启动器重新安装
     for cache in ROOT.rglob("__pycache__"):
         shutil.rmtree(cache, ignore_errors=True)
+
+
+MANIFEST = ".manifest"  # 记录哪些文件是更新器装进来的：只有它们才会在新版本删除时被删掉
+
+
+def _read_manifest() -> set[str]:
+    try:
+        lines = (ROOT / MANIFEST).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    out = set()
+    for rel in lines:
+        rel = rel.strip()
+        pp = PurePosixPath(rel)
+        if rel and not pp.is_absolute() and ".." not in pp.parts and "\\" not in rel and ":" not in rel:
+            out.add(rel)
+    return out
+
+
+def _install(staged: Path, files: dict) -> None:
+    """把临时文件夹里检查好的新版本装进程序文件夹。
+
+    要么全部成功，要么全部还原：覆盖前先备份旧文件，中途任何一步失败（文件被占用、磁盘满……）
+    就把已经改动的文件全部恢复、新增的文件删掉，程序保持原来能用的样子。
+    """
+    old_manifest = _read_manifest()
+    removed = sorted(old_manifest - set(files) - KEEP - {LAUNCHER, MANIFEST})
+    backup_dir = Path(tempfile.mkdtemp(prefix="codecheck_rollback_"))
+    changed: list[tuple[Path, Path | None]] = []  # (程序里的文件, 它的备份；None 表示原来没有这个文件)
+    new_launcher = ROOT / (LAUNCHER + ".new")
+
+    def backup(target: Path, rel: str):
+        if target.is_file():
+            b = backup_dir / rel
+            b.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, b)
+            changed.append((target, b))
+        else:
+            changed.append((target, None))
+
+    try:
+        for rel in files:
+            src, target = staged / rel, ROOT / rel
+            if rel == LAUNCHER:
+                # 正在运行的 .bat 不能直接覆盖，先存成 .new，由启动器自己替换
+                if not target.exists() or target.read_bytes() != src.read_bytes():
+                    backup(new_launcher, LAUNCHER + ".new")
+                    shutil.copyfile(src, new_launcher)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            backup(target, rel)
+            tmp_target = target.with_name(target.name + ".updating")
+            shutil.copyfile(src, tmp_target)
+            tmp_target.replace(target)  # 单个文件原子替换，不会出现写了一半的文件
+        for rel in removed:  # 新版本里已经删掉的文件（只删更新器以前装进来的）
+            target = (ROOT / rel).resolve()
+            if target.is_file() and target.is_relative_to(ROOT.resolve()):
+                backup(target, rel)
+                target.unlink()
+        manifest = ROOT / MANIFEST
+        backup(manifest, MANIFEST)
+        tmp_manifest = manifest.with_name(MANIFEST + ".updating")
+        tmp_manifest.write_text("\n".join(sorted(files)) + "\n", encoding="utf-8")
+        tmp_manifest.replace(manifest)
+    except BaseException:
+        for target, b in reversed(changed):
+            try:
+                if b is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    tmp = target.with_name(target.name + ".restoring")
+                    shutil.copy2(b, tmp)
+                    tmp.replace(target)
+            except OSError:
+                pass
+        for leftover in ROOT.rglob("*.updating"):
+            leftover.unlink(missing_ok=True)
+        raise
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def main() -> int:

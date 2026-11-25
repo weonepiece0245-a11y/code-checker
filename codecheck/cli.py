@@ -9,6 +9,7 @@ import os
 import sys
 
 from .core import check_code
+from .languages import detect
 
 C = {"red": "\033[31m", "yellow": "\033[33m", "green": "\033[32m", "cyan": "\033[36m",
      "bold": "\033[1m", "dim": "\033[2m", "end": "\033[0m"}
@@ -37,21 +38,17 @@ def timeout_arg(v: str) -> int:
 
 def read_text(path: str) -> str:
     """读取代码文件：找不到时给出清楚的提示；中文 Windows 上的 GBK 文件也能读。"""
+    from . import textio
     try:
-        with open(path, "rb") as f:
-            data = f.read()
+        return textio.read(path).text
     except FileNotFoundError:
         sys.exit(f"找不到文件：{path}")
     except IsADirectoryError:
         sys.exit(f"这是一个文件夹，不是文件：{path}")
     except PermissionError:
         sys.exit(f"没有权限读取：{path}")
-    for enc in ("utf-8-sig", "gbk"):
-        try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
+    except OSError as e:
+        sys.exit(f"读取文件失败：{path}（{e}）")
 
 
 def indent_tail(text, max_lines=30):
@@ -59,6 +56,51 @@ def indent_tail(text, max_lines=30):
     if len(lines) > max_lines:
         lines = lines[:max_lines] + [f"...（还有 {len(lines) - max_lines} 行，已省略）"]
     return "\n".join("    " + ln for ln in lines)
+
+
+def _ai(a) -> str:
+    return "auto" if a.ai == "none" else a.ai
+
+
+def _gen_tests(a, code: str) -> dict:
+    """生成测试并运行；失败时返回 {"error": ...}。"""
+    from . import testgen
+    try:
+        # 用和检查时一样的语言（看文件后缀），不要让生成测试时再从代码特征去猜
+        lang_key = a.lang or detect(None if a.file == "-" else a.file, code).key
+        g = testgen.generate(code, lang_key, a.explain_lang, _ai(a))
+        t = testgen.run(code, g["tests"], g["language"], a.timeout, a.sandbox)
+        return {"summary": g["summary"], **t}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _folder_mode(a) -> int:
+    """检查整个文件夹。--json 时所有结果（包括 AI 审查/复查）合在一个 JSON 里输出。"""
+    from . import folder, folder_ai
+    r = folder.scan(a.file)
+    if not a.json:
+        print(folder.format_report(r))
+    for flag, key, title, run, fmt in (
+        (a.ai_recheck, "ai_recheck", "AI 复查：上次的问题解决了吗", folder_ai.recheck, folder_ai.format_recheck),
+        (a.ai_review, "ai_review", "AI 审查整个文件夹", folder_ai.review, folder_ai.format_report),
+    ):
+        if not flag:
+            continue
+        if not a.json:
+            print(color(f"\n━━ {title}（可能需要 1~3 分钟）━━", "bold"))
+        try:
+            data = run(a.file, a.explain_lang, _ai(a))
+            r[key] = data
+            if not a.json:
+                print(fmt(data))
+        except Exception as e:
+            r[key] = {"error": str(e)}
+            if not a.json:
+                print(color(f"{title}失败：" + str(e), "yellow"))
+    if a.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+    return 1 if r["with_errors"] else 0
 
 
 def main(argv=None):
@@ -82,29 +124,7 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     if a.file != "-" and os.path.isdir(a.file):
-        from . import folder
-        r = folder.scan(a.file)
-        if a.json:
-            print(json.dumps(r, ensure_ascii=False, indent=2))
-        else:
-            print(folder.format_report(r))
-        if a.ai_recheck:
-            from . import folder_ai
-            print(color("\n━━ AI 复查：上次的问题解决了吗（可能需要 1~3 分钟）━━", "bold"))
-            try:
-                print(folder_ai.format_recheck(folder_ai.recheck(a.file, a.explain_lang,
-                                                                 "auto" if a.ai == "none" else a.ai)))
-            except Exception as e:
-                print(color("AI 复查失败：" + str(e), "yellow"))
-        if a.ai_review:
-            from . import folder_ai
-            print(color("\n━━ AI 审查整个文件夹（可能需要 1~3 分钟）━━", "bold"))
-            try:
-                print(folder_ai.format_report(folder_ai.review(a.file, a.explain_lang,
-                                                               "auto" if a.ai == "none" else a.ai)))
-            except Exception as e:
-                print(color("AI 审查失败：" + str(e), "yellow"))
-        return 1 if r["with_errors"] else 0
+        return _folder_mode(a)
 
     code = sys.stdin.read() if a.file == "-" else read_text(a.file)
     if a.input_file:
@@ -117,9 +137,11 @@ def main(argv=None):
         print(color("正在检查并请 AI 分析，可能需要几十秒……", "dim"), file=sys.stderr)
     r = check_code(code, None if a.file == "-" else a.file, a.lang, stdin, not a.no_run,
                    a.timeout, sandbox=a.sandbox, ai_backend=a.ai, explain_lang=a.explain_lang,
-                   workdir=None if a.file == "-" else os.path.dirname(os.path.abspath(a.file)))
+                   source_path=None if a.file == "-" else os.path.abspath(a.file))
 
     if a.json:
+        if a.tests:
+            r["tests"] = _gen_tests(a, code)
         print(json.dumps(r, ensure_ascii=False, indent=2))
         return 0 if r["passed"] else 1
 
@@ -159,15 +181,14 @@ def main(argv=None):
         print(color("\nAI 分析失败：" + r["ai_error"], "yellow"))
 
     if a.tests:
-        from . import testgen
         print(color("\n━━ AI 生成测试 ━━", "bold"))
-        try:
-            g = testgen.generate(code, a.lang, a.explain_lang, "auto" if a.ai == "none" else a.ai)
-            t = testgen.run(code, g["tests"], g["language"], a.timeout, a.sandbox)
-            print("代码的用途：" + g["summary"])
+        t = _gen_tests(a, code)
+        if "error" in t:
+            print(color("生成测试失败：" + t["error"], "yellow"))
+        else:
+            from . import testgen
+            print("代码的用途：" + t["summary"])
             print(testgen.format_report(t))
-        except Exception as e:
-            print(color("生成测试失败：" + str(e), "yellow"))
 
     print(color("\n结论：通过 ✓", "green") if r["passed"] else color("\n结论：有问题 ✗", "red"))
     return 0 if r["passed"] else 1

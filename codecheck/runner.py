@@ -5,6 +5,7 @@
 - docker：容器里运行，断网、只读、限内存。适合运行来路不明的代码（需要安装并启动 Docker）。
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,50 @@ def _clip(s: str) -> str:
 
 
 MAX_FILE_BYTES = 10 * 1024 * 1024  # 被运行的代码最多写 10MB 的文件
+
+# “在原位置运行”的引导程序：代码内容来自临时文件（编辑器里的最新内容，可能还没保存），
+# 但让它以为自己就是原来那个文件——能 import 同目录的模块，__file__、报错里的路径和行号都对得上。
+_PY_BOOT = (
+    "import os,sys\n"
+    "_t,_s=sys.argv[1],sys.argv[2]\n"
+    "_c=open(_t,encoding='utf-8').read()\n"
+    "sys.path.insert(0,os.path.dirname(os.path.abspath(_s)))\n"
+    "sys.argv=[_s]\n"
+    "del os,_t\n"
+    "exec(compile(_c,_s,'exec'),{'__name__':'__main__','__file__':_s,'__builtins__':__builtins__})\n"
+)
+_JS_BOOT = (
+    "const Module=require('module'),fs=require('fs'),path=require('path');"
+    "const [t,s]=process.argv.slice(1);const c=fs.readFileSync(t,'utf8');"
+    "const m=new Module(s,null);m.filename=s;m.id='.';m.paths=Module._nodeModulePaths(path.dirname(s));"
+    "process.argv=[process.argv[0],s];process.mainModule=m;m._compile(c,s);"
+)
+_ESM = re.compile(r"^\s*(import\s.+\sfrom\s|import\s+['\"]|export\s)", re.M)
+
+
+def _in_place_cmd(lang: Language, tmp_path: str, source_path: str, code: str) -> list[str] | None:
+    """返回“在原位置运行”的命令；做不到（例如 ES 模块）时返回 None，退回普通方式。"""
+    if lang.key == "python":
+        return [console_python(), "-c", _PY_BOOT, tmp_path, source_path]
+    if lang.key == "javascript" and not _ESM.search(code) and not source_path.lower().endswith(".mjs"):
+        return ["node", "--max-old-space-size=256", "-e", _JS_BOOT, tmp_path, source_path]
+    return None
+
+
+def _clean_boot_frames(text: str) -> str:
+    """去掉报错里属于引导程序的那一层（File "<string>"… 以及它下面的代码行和 ^^^ 标记），只留用户代码的。"""
+    out, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        if re.match(r'\s*File "<string>", line \d+', line):
+            skipping = True
+            continue
+        if skipping:
+            # 这一层下面缩进更深的行（代码、~~~^^^ 标记）一起去掉，直到下一层 File 或错误信息
+            if line.startswith("    ") and not line.lstrip().startswith("File "):
+                continue
+            skipping = False
+        out.append(line)
+    return "".join(out)
 
 
 def _posix_limits(lang_key: str, timeout: int, memory_mb: int):
@@ -172,10 +217,18 @@ def _clean_env(workdir: str) -> dict:
 
 
 def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: int,
-              extra_args: list | None = None, workdir: str | None = None) -> RunResult:
+              extra_args: list | None = None, workdir: str | None = None,
+              source_path: str | None = None) -> RunResult:
     cmd = [part.replace("{file}", path) for part in lang.run_cmd] + list(extra_args or [])
     if cmd[0] == "python3":
         cmd[0] = console_python()
+    in_place = False
+    if source_path and not extra_args and os.path.isdir(os.path.dirname(source_path)):
+        with open(path, encoding="utf-8") as f:
+            boot = _in_place_cmd(lang, path, source_path, f.read())
+        if boot:
+            cmd, in_place = boot, True
+            workdir = os.path.dirname(source_path)
     if not (os.path.isabs(cmd[0]) and os.path.isfile(cmd[0])) and not shutil.which(cmd[0]):
         need = "Node.js（https://nodejs.org 下载 LTS 版本）" if lang.key == "javascript" else lang.name
         raise RuntimeError(f"找不到 {cmd[0]}，没法运行 {lang.name} 代码。请先安装 {need}")
@@ -221,6 +274,8 @@ def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: in
     if code is not None and code < 0 and not timed_out:
         note = {-9: "进程被杀死（可能是内存或 CPU 超限）", -24: "CPU 时间超限",
                 -25: "写入文件过大"}.get(code, f"进程被信号 {-code} 终止")
+    if in_place:
+        err = _clean_boot_frames(err)
     return RunResult(None if timed_out else code, _clip(out), _clip(err), dur, timed_out, "local", note)
 
 
@@ -263,10 +318,10 @@ SANDBOXES = ("local", "docker")
 
 def run(lang: Language, path: str, stdin: str = "", timeout: int = 5, memory_mb: int = 256,
         mode: str = "local", sandbox: str | None = None, extra_args: list | None = None,
-        workdir: str | None = None) -> RunResult:
+        workdir: str | None = None, source_path: str | None = None) -> RunResult:
     mode = sandbox or mode
     if mode not in SANDBOXES:  # 写错了不能悄悄改成本机运行
         raise ValueError(f"未知的运行方式：{mode}（只能是 local 或 docker）")
     if mode == "docker":
         return run_docker(lang, path, stdin, timeout, memory_mb, extra_args)
-    return run_local(lang, path, stdin, timeout, memory_mb, extra_args, workdir)
+    return run_local(lang, path, stdin, timeout, memory_mb, extra_args, workdir, source_path)

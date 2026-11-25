@@ -129,28 +129,6 @@ def group_by_dir(rels: list[str], depth: int = 2) -> list[dict]:
     return [{"dir": k, "files": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
-def _node_check(path: str) -> list[static_check.Issue]:
-    try:
-        p = subprocess.run(["node", "--check", path], capture_output=True, text=True, timeout=20,
-                           encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
-    except subprocess.TimeoutExpired:
-        return [static_check.Issue(0, 0, "tool", "语法检查超时，跳过了这个文件", "warning")]
-    except OSError as e:
-        return [static_check.Issue(0, 0, "tool", f"没法运行 node：{e}", "warning")]
-    if p.returncode == 0:
-        return []
-    line = 0
-    first = p.stderr.splitlines()[0] if p.stderr else ""
-    if ":" in first:
-        try:
-            line = int(first.rsplit(":", 1)[1])
-        except ValueError:
-            pass
-    msg = next((ln for ln in p.stderr.splitlines() if "Error" in ln), p.stderr.strip()[:200])
-    msg = msg.strip().removeprefix("SyntaxError:").strip()
-    return [static_check.Issue(line, 0, "SyntaxError", "语法错误：" + msg, "error")]
-
-
 def _line_count(path: str) -> int:
     try:
         with open(path, "rb") as f:
@@ -180,7 +158,7 @@ def scan(folder: str, exclude: list[str] | None = None, compare: bool = True) ->
     if js:
         if shutil.which("node"):
             with ThreadPoolExecutor(max_workers=8) as pool:
-                for path, found in zip(js, pool.map(_node_check, js), strict=True):
+                for path, found in zip(js, pool.map(static_check.node_syntax, js), strict=True):
                     issues[path].extend(found)
         else:
             notes.append("没有安装 Node.js，JavaScript 文件只列出、没有检查")

@@ -63,6 +63,15 @@ class CheckRequest(BaseModel):
     ai: AIBackend = "auto"
     explain_lang: ExplainLang = "简体中文"
     workdir: str | None = None
+    source_path: str | None = None  # 打开的真实文件：运行时像在原位置一样
+
+
+def _real_file(path: str | None) -> str | None:
+    """只接受确实存在的 .py / .js 文件作为“原位置”。"""
+    if not path:
+        return None
+    p = Path(path)
+    return str(p.resolve()) if p.suffix.lower() in files.ALLOWED and p.is_file() else None
 
 
 class _slot:
@@ -165,9 +174,12 @@ def tests_run(req: RunTestsRequest):
 @app.post("/api/check")
 def check(req: CheckRequest):
     with _slot():
-        return check_code(req.code, None, req.language or None, req.stdin, req.run, req.timeout,
-                          sandbox=req.sandbox, ai_backend=req.ai, explain_lang=req.explain_lang,
-                          workdir=req.workdir)
+        try:
+            return check_code(req.code, None, req.language or None, req.stdin, req.run, req.timeout,
+                              sandbox=req.sandbox, ai_backend=req.ai, explain_lang=req.explain_lang,
+                              workdir=req.workdir, source_path=_real_file(req.source_path))
+        except Exception as e:  # 和其他接口一样：出错时返回说明，而不是笼统的 500
+            return {"error": f"检查时出错：{type(e).__name__}: {e}"}
 
 
 # ---------- 文件和文件夹 ----------

@@ -29,15 +29,14 @@ align-items:center;justify-content:center;font:16px system-ui,'Microsoft YaHei';
 
 
 def _log_to_file():
-    """pythonw 没有控制台，把输出写到 app.log 方便排查问题。"""
-    if True:  # 桌面应用没有可见的控制台，输出一律写进 app.log
-        try:
-            if LOG.exists() and LOG.stat().st_size > 1_000_000:
-                LOG.unlink()
-            f = open(LOG, "a", encoding="utf-8", buffering=1)
-            sys.stdout = sys.stderr = f
-        except OSError:
-            pass
+    """桌面应用没有可见的控制台，把输出一律写进 app.log，方便排查问题。"""
+    try:
+        if LOG.exists() and LOG.stat().st_size > 1_000_000:
+            LOG.unlink()
+        f = open(LOG, "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = f
+    except OSError:
+        pass
     print(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动 ====")
 
 

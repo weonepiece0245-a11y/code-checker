@@ -8,10 +8,17 @@ from .languages import LANGUAGES, detect
 
 def check_code(code: str, filename: str | None = None, language: str | None = None, stdin: str = "",
                run: bool = True, timeout: int = 5, memory_mb: int = 256, sandbox: str = "local",
-               ai_backend: str = "auto", explain_lang: str = "简体中文", workdir: str | None = None) -> dict:
+               ai_backend: str = "auto", explain_lang: str = "简体中文", workdir: str | None = None,
+               source_path: str | None = None) -> dict:
+    """source_path：代码对应的真实文件。给了它，运行时就像在原位置一样（能 import 同目录的模块）。"""
+    if source_path:
+        source_path = os.path.abspath(source_path)
+        filename = filename or source_path
+        workdir = workdir or os.path.dirname(source_path)
     lang = LANGUAGES[language] if language else detect(filename, code)
     with tempfile.TemporaryDirectory(prefix="codecheck_") as tmp:
-        os.chmod(tmp, 0o755)
+        if sandbox == "docker":
+            os.chmod(tmp, 0o755)  # 只有 Docker 里的程序需要读；本机运行时保持只有自己能读
         path = os.path.join(tmp, "main" + lang.suffix)
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
@@ -20,7 +27,8 @@ def check_code(code: str, filename: str | None = None, language: str | None = No
         run_error = ""
         if run:
             try:
-                result = runner.run(lang, path, stdin, timeout, memory_mb, sandbox, workdir=workdir).to_dict()
+                result = runner.run(lang, path, stdin, timeout, memory_mb, sandbox, workdir=workdir,
+                                    source_path=source_path).to_dict()
             except RuntimeError as e:
                 run_error = str(e)
         # 报错信息里的临时路径换成文件名，读起来更清楚

@@ -125,7 +125,11 @@ def _via_api(system: str, user: str) -> str:
     return text
 
 
-def _via_cli(system: str, user: str) -> str:
+TRUNCATED_HINT = "AI 的回答太长，被截断了。可以排除一些文件夹、选一个子文件夹，或者分几次审查。"
+
+
+def _run_claude(system: str, user: str, timeout: int, output_args: list[str]) -> str:
+    """调用本机已登录的 Claude Code（claude -p），返回它的标准输出。用的是订阅额度。"""
     exe = find_claude()  # Windows 上可能是 claude.cmd，需要完整路径
     if not exe:
         raise RuntimeError("没有找到 claude 命令，请先安装并登录 Claude Code")
@@ -133,24 +137,29 @@ def _via_cli(system: str, user: str) -> str:
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
         f.write(system)
         sys_file = f.name
-    cmd = [exe, "-p", "--tools", "", "--system-prompt-file", sys_file,
-           "--output-format", "text", "--no-session-persistence"]
+    cmd = [exe, "-p", "--tools", "", "--system-prompt-file", sys_file, "--no-session-persistence", *output_args]
     if os.environ.get("CODECHECK_MODEL"):
         cmd += ["--model", MODEL]
+    # 去掉 API key 环境变量，确保 Claude Code 走订阅额度而不是按 API 计费
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     try:
-        # 去掉 API key 环境变量，确保 Claude Code 走订阅额度而不是按 API 计费
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
-        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW,
+        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=timeout, creationflags=NO_WINDOW,
                            encoding="utf-8", errors="replace", env=env)
     except subprocess.TimeoutExpired:
         raise RuntimeError("Claude Code 响应超时") from None
     finally:
-        os.unlink(sys_file)
-    if p.returncode != 0:
+        try:
+            os.unlink(sys_file)
+        except OSError:
+            pass
+    if p.returncode != 0 and not p.stdout.strip().startswith("{"):
         raise RuntimeError("Claude Code 调用失败：" + (p.stderr or p.stdout).strip()[:500]
                            + "\n（如果提示未登录，请先在终端运行 claude 并登录）")
-    return p.stdout.strip()
+    return p.stdout
+
+
+def _via_cli(system: str, user: str) -> str:
+    return _run_claude(system, user, 300, ["--output-format", "text"]).strip()
 
 
 def analyze(language_name: str, code: str, issues: list, run: dict | None, stdin: str = "",
@@ -170,58 +179,68 @@ def analyze(language_name: str, code: str, issues: list, run: dict | None, stdin
 
 # ---------- 结构化输出（生成测试等功能用）----------
 
+def _parse_object(text: str) -> dict:
+    """把 AI 返回的文字解析成 dict；解析不了就给出看得懂的提示。"""
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        raise RuntimeError("AI 返回的结果格式不对（可能被截断了）。请再试一次；"
+                           "如果是审查文件夹，可以先排除一些文件夹。") from None
+    if not isinstance(data, dict):
+        raise RuntimeError("AI 返回的结果格式不对，请再试一次")
+    return data
+
+
 def _structured_api(system: str, user: str, schema: dict, timeout: int = 600) -> dict:
     import anthropic
 
     client = anthropic.Anthropic(timeout=timeout)
     try:
-        resp = client.beta.messages.create(
+        # 输出可能很长（审查整个文件夹），用流式请求避免超时，并放宽长度上限
+        with client.beta.messages.stream(
             model=MODEL,
-            max_tokens=16000,
+            max_tokens=32000,
             system=system,
             messages=[{"role": "user", "content": user}],
             output_config={"effort": "medium", "format": {"type": "json_schema", "schema": schema}},
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
-        )
+        ) as stream:
+            resp = stream.get_final_message()
+    except anthropic.AuthenticationError:
+        raise RuntimeError("API key 无效，请检查 ANTHROPIC_API_KEY") from None
+    except anthropic.RateLimitError:
+        raise RuntimeError("请求太频繁或额度用完，请稍后再试") from None
     except anthropic.APIStatusError as e:
         raise RuntimeError(f"API 出错（{e.status_code}）：{e.message}") from None
     except anthropic.APIConnectionError:
         raise RuntimeError("连不上 Anthropic API，请检查网络") from None
     if resp.stop_reason == "refusal":
         raise RuntimeError("AI 拒绝处理这段代码")
-    text = next((b.text for b in resp.content if b.type == "text"), "")
-    return json.loads(text)
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError(TRUNCATED_HINT)
+    return _parse_object(next((b.text for b in resp.content if b.type == "text"), ""))
 
 
 def _structured_cli(system: str, user: str, schema: dict, timeout: int = 400) -> dict:
-    exe = find_claude()
-    if not exe:
-        raise RuntimeError("没有找到 claude 命令，请先安装并登录 Claude Code")
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
-        f.write(system)
-        sys_file = f.name
-    cmd = [exe, "-p", "--tools", "", "--system-prompt-file", sys_file, "--output-format", "json",
-           "--json-schema", json.dumps(schema, ensure_ascii=False), "--no-session-persistence"]
-    if os.environ.get("CODECHECK_MODEL"):
-        cmd += ["--model", MODEL]
-    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    stdout = _run_claude(system, user, timeout,
+                         ["--output-format", "json", "--json-schema", json.dumps(schema, ensure_ascii=False)])
     try:
-        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=timeout, creationflags=NO_WINDOW,
-                           encoding="utf-8", errors="replace", env=env)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Claude Code 响应超时") from None
-    finally:
-        os.unlink(sys_file)
-    try:
-        out = json.loads(p.stdout)
+        out = json.loads(stdout)
     except json.JSONDecodeError:
-        raise RuntimeError("Claude Code 调用失败：" + (p.stderr or p.stdout).strip()[:500]) from None
+        raise RuntimeError("Claude Code 返回的内容无法解析：" + stdout.strip()[:300]) from None
+    if not isinstance(out, dict):
+        raise RuntimeError("Claude Code 返回的内容格式不对")
     if out.get("is_error"):
-        raise RuntimeError("Claude Code 出错：" + str(out.get("result", ""))[:500])
+        result = str(out.get("result", ""))
+        if "max" in str(out.get("stop_reason", "")) or "max_tokens" in result:
+            raise RuntimeError(TRUNCATED_HINT)
+        raise RuntimeError("Claude Code 出错：" + result[:500])
     if isinstance(out.get("structured_output"), dict):
         return out["structured_output"]
-    return json.loads(out.get("result", "{}"))
+    if out.get("stop_reason") == "max_tokens":
+        raise RuntimeError(TRUNCATED_HINT)
+    return _parse_object(out.get("result"))
 
 
 def structured(system: str, user: str, schema: dict, backend: str = "auto",

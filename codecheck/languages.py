@@ -44,7 +44,7 @@ def detect(filename: str | None, code: str) -> Language:
     try:
         compile(code, "<detect>", "exec")  # 只编译，不运行
         py_ok = True
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
         py_ok = False
     js, py = _score(code, _JS_RE), _score(code, _PY_RE)
     if py_ok and js <= py:

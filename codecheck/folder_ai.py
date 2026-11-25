@@ -1,7 +1,7 @@
 """AI 审查整个文件夹：把项目里的代码（加上静态检查结果）交给 AI，找逻辑错误、安全隐患等。"""
 import os
 
-from . import ai, folder, store
+from . import ai, folder, store, textio
 
 CHAR_BUDGET = 150_000  # 一次最多发送多少字符的代码（大约 5 万~8 万 token）
 
@@ -57,32 +57,35 @@ SYSTEM = """你是一位经验丰富、说话直接但友善的代码审查员�
 """
 
 
+def _file_block(f: dict, text: str) -> str:
+    """一个文件真正要发给 AI 的内容：静态检查结果 + 带行号的代码。"""
+    numbered = "\n".join(f"{n + 1:>4} | {ln}" for n, ln in enumerate(text.split("\n")))
+    lint = "\n".join(f"  第 {i['line']} 行 [{i['code']}] {i['message']}" for i in f["issues"]) or "  无"
+    return f"===== 文件：{f['rel']} =====\n静态检查发现：\n{lint}\n代码：\n{numbered}"
+
+
 def plan(path: str, scan_result: dict | None = None, exclude: list[str] | None = None) -> dict:
-    """决定发送哪些文件：有错误的优先，然后是有警告的，再按文件大小从小到大，直到用完额度。"""
+    """决定发送哪些文件：有错误的优先，然后是有警告的，再按文件从小到大，直到用完篇幅。
+
+    这一步就把文件内容读进来，后面直接用：审查要几分钟，期间文件被改名或删除也不会让审查失败。
+    篇幅按真正要发送的字符数算（包括行号和静态检查结果）。
+    """
     r = scan_result or folder.scan(path, exclude, compare=False)
-    included, skipped, used = [], [], 0
+    included, skipped, unreadable, used = [], [], [], 0
     order = sorted(r["files"], key=lambda f: (-f["errors"], -f["warnings"], f["lines"]))
     for f in order:
         try:
-            size = os.path.getsize(f["path"])
+            block = _file_block(f, textio.read(f["path"]).text)
         except OSError:
+            unreadable.append(f["rel"])
             continue
-        if used + size > CHAR_BUDGET:
+        if used + len(block) > CHAR_BUDGET:
             skipped.append(f["rel"])
             continue
-        included.append(f)
-        used += size
-    return {"scan": r, "included": included, "skipped": sorted(skipped), "chars": used}
-
-
-def _read(path: str) -> str:
-    data = open(path, "rb").read()
-    for enc in ("utf-8-sig", "gbk"):
-        try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
+        included.append({**f, "block": block})
+        used += len(block)
+    return {"scan": r, "included": included, "skipped": sorted(skipped), "unreadable": sorted(unreadable),
+            "chars": used}
 
 
 def _code_parts(p: dict) -> list[str]:
@@ -90,11 +93,10 @@ def _code_parts(p: dict) -> list[str]:
              f"这次发送了其中 {len(p['included'])} 个。"]
     if p["skipped"]:
         parts.append("因为篇幅限制没有发送的文件：" + "、".join(p["skipped"][:50]))
+    if p["unreadable"]:
+        parts.append("读取失败（可能刚被删除或改名）的文件：" + "、".join(p["unreadable"][:50]))
     for f in sorted(p["included"], key=lambda f: f["rel"].lower()):
-        text = _read(f["path"]).replace("\r\n", "\n")
-        numbered = "\n".join(f"{i + 1:>4} | {ln}" for i, ln in enumerate(text.split("\n")))
-        lint = "\n".join(f"  第 {i['line']} 行 [{i['code']}] {i['message']}" for i in f["issues"]) or "  无"
-        parts.append(f"===== 文件：{f['rel']} =====\n静态检查发现：\n{lint}\n代码：\n{numbered}")
+        parts.append(f["block"])
     return parts
 
 
@@ -102,7 +104,10 @@ def _attach_paths(issues: list[dict], p: dict):
     """把 AI 说的相对路径对应回真实文件，方便界面里点击打开。"""
     by_rel = {f["rel"].replace("\\", "/").lower(): f["path"] for f in p["included"]}
     for issue in issues:
-        issue["path"] = by_rel.get(issue["file"].replace("\\", "/").lstrip("./").lower())
+        rel = issue["file"].replace("\\", "/")
+        while rel.startswith("./"):  # 只去掉“./”前缀；不能用 lstrip，它会把 .eslintrc.js 的点也去掉
+            rel = rel[2:]
+        issue["path"] = by_rel.get(rel.lower())
 
 
 ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -203,14 +208,17 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
     previous = []
     for n, i in enumerate(last["issues"], 1):
         st = status.get(n, {"status": "unclear", "note": "AI 没有给出判断", "line": 0})
-        previous.append({**i, "status": st["status"], "note": st["note"],
-                         "line": st.get("line") or i["line"] if st["status"] != "fixed" else i["line"]})
+        if st["status"] == "fixed":
+            line = i["line"]                      # 已解决：保留上次的位置
+        else:
+            line = st.get("line") or i["line"]    # 没解决：优先用 AI 给出的现在的行号
+        previous.append({**i, "status": st["status"], "note": st["note"], "line": line})
     _attach_paths(previous, p)
     _attach_paths(data["new_issues"], p)
     data["new_issues"].sort(key=lambda i: ORDER.get(i["severity"], 3))
 
     # 存成新的“上次审查”：没解决的旧问题 + 新问题，下次复查就和这些比
-    still = [{**i, "line": i["line"]} for i in previous if i["status"] in ("partial", "not_fixed", "unclear")]
+    still = [i for i in previous if i["status"] in ("partial", "not_fixed", "unclear")]
     _save(p["scan"]["folder"], still + data["new_issues"], data["overview"])
 
     counts = {k: sum(1 for i in previous if i["status"] == k) for k in ("fixed", "partial", "not_fixed", "unclear")}
