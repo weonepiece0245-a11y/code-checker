@@ -354,34 +354,51 @@ def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: i
     inner += [f"/code/{a}" for a in (extra_args or [])]
     import uuid
     name = f"codecheck-{uuid.uuid4().hex[:12]}"
+    # 不用 --rm：结束后先查容器的真实状态（有没有真的启动、是不是内存超限），再删掉容器。
     # 容器里也套一层 timeout：到时间先请程序结束（退出码 124），2 秒后还不结束就强制结束（137）
-    cmd = ["docker", "run", "--rm", "-i", "--name", name, "--network", "none", f"--memory={memory_mb}m",
+    cmd = ["docker", "run", "-i", "--name", name, "--network", "none", f"--memory={memory_mb}m",
            "--cpus=1", "--pids-limit=64", "--read-only", "--tmpfs", "/tmp:size=16m",
            "-v", f"{folder}:/code:ro", "-w", "/tmp", lang.docker_image,
            "timeout", "-s", "TERM", "-k", "2", str(timeout), *inner]
     start = time.monotonic()
+    killed_by_us = False
     try:
         p = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=timeout + 30,
                            creationflags=NO_WINDOW, encoding="utf-8", errors="replace")
-        dur = int((time.monotonic() - start) * 1000)
-        if p.returncode == 125:
-            raise RuntimeError("Docker 启动失败：" + p.stderr.strip())
-        # 只有确实跑满了时间，124 / 137 才算“超时”；没跑满就 137，多半是内存超限被系统结束；
-        # 程序自己用 124 退出（极少见）也不会被误判
-        ran_full = dur >= timeout * 1000
-        if p.returncode in (124, 137) and ran_full:
-            return RunResult(None, _clip(p.stdout), _clip(p.stderr), dur, True, "docker",
-                             (f"超过 {timeout} 秒被强制停止（可能是死循环或在等待输入）" + pulled_note).strip())
-        note = "进程被强制结束（多半是内存超限）" if p.returncode == 137 else ""
-        return RunResult(p.returncode, _clip(p.stdout), _clip(p.stderr), dur, False, "docker",
-                         (note + pulled_note).strip())
+        out, err, code = p.stdout, p.stderr, p.returncode
     except subprocess.TimeoutExpired as e:
         # 本机的 docker 命令超时只会结束客户端，容器本身要单独停掉
         subprocess.run(["docker", "kill", name], capture_output=True, creationflags=NO_WINDOW, timeout=30)
-        dur = int((time.monotonic() - start) * 1000)
+        killed_by_us = True
         out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        code = None
+    dur = int((time.monotonic() - start) * 1000)
+    state = _container_state(name)  # 删掉容器前先看它的状态
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True, creationflags=NO_WINDOW, timeout=30)
+    if state is None:  # 容器根本没建起来：是 Docker 自己出了问题，不是用户程序的退出码
+        raise RuntimeError("Docker 启动失败：" + (err.strip() or "未知原因")[-300:])
+    if killed_by_us:
         return RunResult(None, _clip(out), _clip(err), dur, True, "docker", "运行超时，容器已被强制停止")
+    if state["oom"]:
+        return RunResult(code, _clip(out), _clip(err), dur, False, "docker",
+                         (f"内存超过 {memory_mb}MB，被系统强制结束" + pulled_note).strip())
+    if code in (124, 137) and dur >= timeout * 1000:
+        return RunResult(None, _clip(out), _clip(err), dur, True, "docker",
+                         (f"超过 {timeout} 秒被强制停止（可能是死循环或在等待输入）" + pulled_note).strip())
+    return RunResult(code, _clip(out), _clip(err), dur, False, "docker", pulled_note)
+
+
+def _container_state(name: str) -> dict | None:
+    """容器结束后的状态：{"oom": 是否因内存超限被结束}；容器不存在（没建起来）返回 None。"""
+    try:
+        r = subprocess.run(["docker", "inspect", "-f", "{{.State.OOMKilled}}", name], capture_output=True,
+                           text=True, creationflags=NO_WINDOW, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return {"oom": False}
+    if r.returncode != 0:
+        return None
+    return {"oom": r.stdout.strip().lower() == "true"}
 
 
 SANDBOXES = ("local", "docker")

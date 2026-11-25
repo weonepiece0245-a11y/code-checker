@@ -157,7 +157,7 @@ def _run_claude(system: str, user: str, timeout: int, output_args: list[str], ca
     """调用本机已登录的 Claude Code（claude -p），返回它的标准输出。用的是订阅额度。"""
     exe = find_claude()  # Windows 上可能是 claude.cmd，需要完整路径
     if not exe:
-        raise RuntimeError("没有找到 claude 命令，请先安装并登录 Claude Code")
+        raise BackendUnavailable("没有找到 claude 命令，请先安装并登录 Claude Code")
     # 系统提示写进临时文件再传，避免 Windows 命令行对多行参数的限制
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
         f.write(system)
@@ -193,8 +193,10 @@ def _run_claude(system: str, user: str, timeout: int, output_args: list[str], ca
         except OSError:
             pass
     if p.returncode != 0 and not p.stdout.strip().startswith("{"):
-        raise RuntimeError("Claude Code 调用失败：" + (p.stderr or p.stdout).strip()[:500]
-                           + "\n（如果提示未登录，请先在终端运行 claude 并登录）")
+        raw = (p.stderr or p.stdout).strip()
+        # 只看 Claude Code 自己输出的原始错误来判断是不是“没登录”，不能看下面拼接了提示的整句话
+        error_type = BackendUnavailable if _is_login_error(raw) else RuntimeError
+        raise error_type("Claude Code 调用失败：" + raw[:500] + "\n（如果提示未登录，请先在终端运行 claude 并登录）")
     return p.stdout
 
 
@@ -202,8 +204,13 @@ def _via_cli(system: str, user: str) -> str:
     return _run_claude(system, user, 300, ["--output-format", "text"]).strip()
 
 
-_LOGIN_HINTS = ("login", "log in", "logged in", "not authenticated", "authentication", "unauthorized",
-                "invalid api key", "oauth", "subscription", "credentials", "未登录", "登录")
+class BackendUnavailable(RuntimeError):
+    """Claude Code 本身用不了：没安装、没登录、登录失效、订阅不可用。只有这种错误才会改用 API key。"""
+
+
+# 用来识别 Claude Code 原始错误信息里的“没登录”（英文为主；不包含我们自己附加的中文提示）
+_LOGIN_HINTS = ("please run /login", "not logged in", "log in", "login required", "not authenticated",
+                "authentication failed", "unauthorized", "invalid api key", "oauth token", "subscription")
 
 
 def _is_login_error(message: str) -> bool:
@@ -221,10 +228,10 @@ def _with_fallback(choice: str, call_cli, call_api) -> tuple[str, object]:
             return "cli", call_cli()
         except InterruptedError:
             raise
-        except RuntimeError as e:
-            # 只有“Claude Code 没登录 / 登录失效 / 订阅不可用”时才改用 API key（会按量计费，结果里会标明）；
-            # 其他错误（网络、额度用完、内容问题……）照常报出来，不悄悄换成付费的方式
-            if choice == "auto" and has_api_key() and _is_login_error(str(e)):
+        except BackendUnavailable:
+            # 只有“Claude Code 本身用不了”时才改用 API key（会按量计费，结果里会标明用的是 API key）；
+            # 其他错误（网络、额度用完、内容问题、回答被截断……）照常报出来，不悄悄换成付费的方式
+            if choice == "auto" and has_api_key():
                 return "api", call_api()
             raise
     if backend == "none":

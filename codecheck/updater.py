@@ -32,7 +32,8 @@ def _ver(s: str) -> tuple:
     return (nums, 0 if m.group(2).strip() else 1)
 
 
-MAX_DOWNLOAD = 30 * 1024 * 1024  # 更新包最大 30MB（现在大约 0.1MB），超过就当作不正常
+MAX_DOWNLOAD = 30 * 1024 * 1024   # 更新包最大 30MB（现在大约 0.1MB），超过就当作不正常
+MAX_UNPACKED = 100 * 1024 * 1024  # 解压后最大 100MB（防“压缩包炸弹”）
 
 
 def _get(url: str, timeout: int) -> bytes:
@@ -102,6 +103,8 @@ def apply(source: str, remote: str) -> None:
     """下载 → 在临时文件夹里解压并检查 → 全部没问题再覆盖。失败时抛出异常，原文件不动。"""
     data = _get(f"https://codeload.github.com/{source}/zip/refs/heads/main", 60)
     zf = zipfile.ZipFile(io.BytesIO(data))
+    if sum(info.file_size for info in zf.infolist()) > MAX_UNPACKED or len(zf.infolist()) > 2000:
+        raise ValueError("更新包解压后大得不正常，已放弃这次更新")
     if zf.testzip() is not None:
         raise ValueError("更新包已损坏")
     names = zf.namelist()

@@ -267,14 +267,13 @@ button.big small{font-size:12.5px;font-weight:400;opacity:.85}
 </main>
 <script>
 const SAMPLES = {
-  "Python：除以零 + 拼写错误": {lang:"python", code:`def average(nums):
+  "Python：拼错变量名": {lang:"python", code:`def average(nums):
     total = 0
     for n in nums:
         total += n
-    return totl / len(nums)
+    return totl / len(nums)   # totl 拼错了，应该是 total
 
 print(average([1, 2, 3]))
-print(average([]))
 `},
   "Python：读取输入时类型错误": {lang:"python", stdin:"5\n3\n", code:`a = input("第一个数：")
 b = input("第二个数：")
@@ -296,6 +295,15 @@ function oldest(list) {
 }
 
 console.log(oldest(users));
+`},
+  "Python：除以零": {lang:"python", code:`def average(nums):
+    total = 0
+    for n in nums:
+        total += n
+    return total / len(nums)
+
+print(average([1, 2, 3]))  # 正常：2.0
+print(average([]))         # 空列表：len 是 0，会除以零
 `},
 };
 const $ = id => document.getElementById(id);
@@ -748,7 +756,7 @@ function renderRecheck(d) {
       <p style="margin:6px 0">改完“还要处理”的问题后，再点一次“✅ AI 复查”，直到全部解决。</p></details>
     <p class="muted" style="font-size:12.5px;margin:0 0 4px">对比的是上次 AI 审查（${esc(d.last_time)}）。
       重新审查了 ${d.reviewed.length} 个改动过的文件${d.unchanged ? `，${d.unchanged} 个没改动的文件跳过` : ""}${d.batches > 1 ? `（分 ${d.batches} 批）` : ""}。</p>
-    <p style="margin:0 0 8px">${esc(d.overview)}</p>`;
+    <p style="margin:0 0 8px">${esc(d.overview)}</p>${warnBox(d)}`;
   if (allFixed) h += `<p style="color:var(--ok);font-weight:600">🎉 上次的问题都解决了，也没有发现新问题！</p>`;
   const card = i => {
     const where = esc(i.file) + (i.line ? ` 第 ${i.line} 行` : "");
@@ -790,7 +798,7 @@ function renderReview(d) {
       <span class="stat" style="color:#ea580c"><b>${medium.length}</b> 中等</span>
       <span class="stat" style="color:var(--warn)"><b>${low.length}</b> 轻微</span>
       <span class="stat"><b>${d.reviewed.length}</b> 个文件已审查${d.batches > 1 ? `（分 ${d.batches} 批）` : ""}</span></div>
-    ${EXPLAIN_REVIEW}`;
+    ${EXPLAIN_REVIEW}${warnBox(d)}`;
   const first = high.length ? "🔴 严重" : (medium.length ? "🟠 中等" : "");
   h += `<div class="nextstep">👉 <b>下一步：</b>${first ? `先改${first}的问题（点问题下面的“💡 怎么改”看改法，点文件名直接打开），` : ""}改完后回到“文件夹”标签，点 <b>“✅ AI 复查”</b> 确认改好了没有。</div>`;
   h += `<details open><summary class="muted" style="cursor:pointer;font-size:13px">项目概况</summary><p style="margin:4px 0 8px">${esc(d.overview)}</p></details>`;
@@ -815,11 +823,18 @@ function aiChoiceFor(what) {
   return "auto";
 }
 let lastTests = null;  // {summary, tests, language}
+// 服务器拒绝时（太忙、正在更新……）把它给的中文原因显示出来
+async function httpError(r) {
+  let msg = "";
+  try { const j = await r.json(); msg = typeof j.detail === "string" ? j.detail : ""; } catch (e) {}
+  return new Error(msg || "服务器返回 " + r.status);
+}
 async function post(url, body) {
   const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-  if (!r.ok) throw new Error("服务器返回 " + r.status);
+  if (!r.ok) throw await httpError(r);
   return r.json();
 }
+const warnBox = d => (d.warnings || []).map(w => `<div class="nextstep" style="border-color:var(--warn)">⚠️ ${esc(w)}</div>`).join("");
 function testsBusy(html) {
   const box = $("testsout");
   showView("testsout"); setBadge("testsout", "spin");
@@ -842,7 +857,7 @@ async function genTests() {
       source_path: curFile ? curFile.path : null,
       ai: aiChoice, explain_lang: $("explain").value});
     if (g.error) throw new Error(g.error);
-    lastTests = g;
+    lastTests = g;  // 新的一批测试：之前放行过的编号不再有效
     await runTests();
   } catch (e) {
     setBadge("testsout", "bad", "!");
@@ -851,11 +866,16 @@ async function genTests() {
 }
 async function runTests(allowRisky) {
   if (!lastTests) return;
+  // 放行过的测试记住：之后“用当前代码重新运行”时不用再确认一次
+  lastTests.allowed = lastTests.allowed || [];
+  if (Array.isArray(allowRisky)) lastTests.allowed = [...new Set([...lastTests.allowed, ...allowRisky])];
+  if (allowRisky === true) lastTests.allowed = lastTests.tests.map((_, i) => i + 1);
+  allowRisky = lastTests.allowed;
   testsBusy("正在逐个运行测试…");
   try {
     const r = await post("/api/tests/run", {code: $("code").value, language: lastTests.language,
       tests: lastTests.tests, timeout: +$("timeout").value || 5, sandbox: $("sandbox").value,
-      source_path: curFile ? curFile.path : null, allow_risky: allowRisky === true});
+      source_path: curFile ? curFile.path : null, allow_risky: allowRisky});
     if (r.error) throw new Error(r.error);
     renderTests(r);
   } catch (e) {
@@ -869,10 +889,13 @@ function renderTests(r) {
   setBadge("testsout", all ? "ok" : "bad", `${r.passed}/${r.total}`);
   markNew("testsout");
   let h = `<h2>测试结果 <span class="badge ${all ? "ok" : "bad"}">${r.passed} / ${r.total} 通过</span></h2>`;
-  if (r.skipped) h += `<div class="cmp" style="border-color:var(--warn)">⚠️ 有 <b>${r.skipped}</b> 个测试里有删除文件、联网、执行命令之类的操作，<b>为了安全没有运行</b>（下面标了 ⚠ 的）。
+  const riskyCount = r.results.filter(t => t.skipped && t.risk).length;
+  if (riskyCount) h += `<div class="cmp" style="border-color:var(--warn)">⚠️ 有 <b>${riskyCount}</b> 个测试里有读写文件、联网、执行命令之类的操作，<b>为了安全没有运行</b>（下面标了 ⚠ 的）。
       <div style="font-size:13px;margin-top:4px">AI 写的测试一般不需要这些操作；如果被检查的代码里藏了恶意的说明文字，AI 可能被诱导写出有害的测试。
       请先看一下这些测试代码，确认没问题再运行。</div>
-      <p style="margin:6px 0 0"><button class="ghost" id="runrisky">我看过了，也运行这 ${r.skipped} 个测试</button></p></div>`;
+      <div style="font-size:13px;margin-top:4px">测试代码是 AI 写的，${$("sandbox").value === "local" ? "会在你的电脑上运行（本机不隔离）；检查别人的代码时建议在“设置”里改用 Docker 隔离。" : "会在 Docker 容器里运行。"}</div>
+      <p style="margin:6px 0 0"><button class="ghost" id="runrisky">我看过了，运行全部 ${riskyCount} 个</button>
+        <span class="muted" style="font-size:12.5px">也可以在下面只运行某一个</span></p></div>`;
   h += `<div class="bar"><i style="width:${pct}%"></i></div>`;
   h += `<p class="muted" style="margin:0 0 8px">代码的用途：${esc(lastTests.summary)}</p>`;
   h += `<div class="row" style="margin:0 0 6px"><button class="ghost" id="rerun">用当前代码重新运行这些测试</button>
@@ -883,7 +906,8 @@ function renderTests(r) {
       : `<div class="kv"><b>输入</b><pre>${esc(t.stdin) || "（无）"}</pre></div>`;
     if (t.skipped) {
       h += `<details class="test fail" open><summary><span class="mark" style="color:var(--warn)">⚠</span><span>${i + 1}. ${esc(t.name)}（没有运行）</span></summary>
-        <div class="purpose">测试里有${esc(t.risk)}的操作，为了安全先没运行。</div>${what}</details>`;
+        <div class="purpose">${esc(t.skip_reason || "")}</div>${what}
+        ${t.risk ? `<p style="margin:4px 0 0 22px"><button class="ghost" data-allow="${i + 1}">我看过了，只运行这一个</button></p>` : ""}</details>`;
       return;
     }
     const actual = t.timed_out ? "超时（可能有死循环；如果是函数测试，也可能是顶层代码卡住了）" : (t.actual_output.trim() || "（无输出）");
@@ -897,11 +921,14 @@ function renderTests(r) {
     </details>`;
   });
   $("testsout").innerHTML = h;
-  $("rerun").onclick = () => runTests(false);
+  $("rerun").onclick = () => runTests();
   $("regen").onclick = genTests;
   if ($("runrisky")) $("runrisky").onclick = () => {
     if (confirm("确定要运行这些含有危险操作的测试吗？它们会在“设置”里选的运行方式下运行。")) runTests(true);
   };
+  document.querySelectorAll("#testsout [data-allow]").forEach(b => b.onclick = () => {
+    if (confirm(`确定要运行第 ${b.dataset.allow} 个测试吗？请确认已经看过它的代码。`)) runTests([+b.dataset.allow]);
+  });
 }
 $("gentests").onclick = genTests;
 
@@ -967,7 +994,7 @@ async function go() {
         run: $("run").checked, timeout: +$("timeout").value || 5, sandbox: $("sandbox").value,
         ai: $("ai").value, explain_lang: $("explain").value,
         workdir: curFile ? dirOf(curFile.path) : null, source_path: curFile ? curFile.path : null})});
-    if (!r.ok) throw new Error("服务器返回 " + r.status + "：" + await r.text());
+    if (!r.ok) throw await httpError(r);
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     render(d);

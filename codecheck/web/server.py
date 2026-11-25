@@ -43,6 +43,11 @@ RESTART_CODE = 10                          # 启动器看到这个退出码会�
 RESTART_HOOK = None                        # 桌面应用会设置自己的重启方式
 WATCHDOG = False                           # 桌面应用的备用模式：页面关闭后自动退出
 LAST_PING = 0.0
+UPDATING = threading.Event()               # 正在下载/安装更新：这期间不再接新的检查和审查
+SLOT_WAIT = 20                             # 检查排队最多等几秒，等不到就提示“太忙”
+# 后台任务：分批审查可能要十几分钟，网页定时来问进度
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
 
 Lang = Literal["python", "javascript"]
 Sandbox = Literal["local", "docker"]
@@ -90,8 +95,13 @@ async def local_only(request: Request, call_next):
 class _slot:
     """限制同时运行的检查数量；等太久就返回 429（太忙，请稍后再试）。"""
     def __enter__(self):
-        if not RUN_SLOTS.acquire(timeout=120):
-            raise HTTPException(429, "同时进行的检查太多了，请稍后再试")
+        if UPDATING.is_set():
+            raise HTTPException(503, "程序正在更新，马上会重启，请稍等再试")
+        if not RUN_SLOTS.acquire(timeout=SLOT_WAIT):
+            raise HTTPException(429, "同时进行的检查太多了，请等前面的完成后再试")
+        if UPDATING.is_set():  # 排队期间开始了更新
+            RUN_SLOTS.release()
+            raise HTTPException(503, "程序正在更新，马上会重启，请稍等再试")
 
     def __exit__(self, *exc):
         RUN_SLOTS.release()
@@ -196,15 +206,22 @@ def _busy_reason() -> str:
 
 @app.post("/api/update/apply")
 def update_apply():
+    if UPDATING.is_set():
+        return {"ok": False, "message": "已经在更新了，请稍等"}
+    # 先挂上“正在更新”的牌子再检查忙不忙：这样检查完到真正安装之间，不会有新的检查或审查插进来
+    UPDATING.set()
     busy = _busy_reason()
     if busy:
+        UPDATING.clear()
         return {"ok": False, "message": f"{busy}，更新会重启程序把它打断。请等它完成（或取消）后再更新。"}
-    info_ = updater.check()
-    if not info_["has_update"]:
-        return {"ok": False, "message": info_["error"] or "已经是最新版本"}
     try:
+        info_ = updater.check()
+        if not info_["has_update"]:
+            UPDATING.clear()
+            return {"ok": False, "message": info_["error"] or "已经是最新版本"}
         updater.apply(updater.update_source(), info_["remote"])
     except Exception as e:
+        UPDATING.clear()
         return {"ok": False, "message": f"下载更新失败：{e}"}
     # 先把结果返回给网页，再退出，让启动器用新版本重新启动
     threading.Timer(1.0, RESTART_HOOK or (lambda: os._exit(RESTART_CODE))).start()
@@ -261,7 +278,7 @@ class RunTestsRequest(BaseModel):
     timeout: int = Field(5, ge=1, le=60)
     sandbox: Sandbox = "local"
     source_path: str | None = None  # 打开的真实文件：测试也在原位置运行
-    allow_risky: bool = False       # 用户看过并同意后，才运行看起来有危险的测试
+    allow_risky: bool | list[int] = False  # 用户看过并同意后才运行有危险操作的测试：True = 全部，列表 = 这几个编号
 
 
 @app.post("/api/tests/run")
@@ -297,6 +314,8 @@ class PathRequest(BaseModel):
 @app.post("/api/fs/read")
 def fs_read(req: PathRequest):
     try:
+        if not files.is_allowed(req.path):  # files.read 里也会再查一次（双重保险）
+            raise PermissionError("只能打开你用“打开文件”选过的文件，或“检查文件夹”选过的文件夹里的文件")
         return files.read(req.path)
     except Exception as e:
         return {"error": str(e)}
@@ -312,6 +331,8 @@ class SaveRequest(BaseModel):
 @app.post("/api/fs/save")
 def fs_save(req: SaveRequest):
     try:
+        if not files.is_allowed(req.path):  # files.save 里还会确认是之前打开过的文件
+            raise PermissionError("只能保存回之前打开过的文件")
         return files.save(req.path, req.content, req.encoding, req.crlf)
     except Exception as e:
         return {"error": str(e)}
@@ -340,8 +361,9 @@ def fs_exclude(req: ExcludeRequest):
 @app.post("/api/fs/scan")
 def fs_scan(req: PathRequest):
     try:
-        r = folder.scan(_folder(req.path), _exclude(req))
-        last = folder_ai.last_review(req.path)
+        path = _folder(req.path)
+        r = folder.scan(path, _exclude(req))
+        last = folder_ai.last_review(path)
         r["last_review"] = ({"time": last["time"], "issues": len(last["issues"]),
                              "pending": len(last.get("pending", []))} if last else None)
         return r
@@ -396,11 +418,6 @@ def fs_ai_recheck(req: AIReviewRequest):
     return fs_ai_review(req)
 
 
-# 后台任务：分批审查可能要十几分钟，网页定时来问进度
-JOBS: dict[str, dict] = {}
-JOBS_LOCK = threading.Lock()
-
-
 @app.post("/api/fs/ai_job")
 def fs_ai_job(req: AIReviewRequest):
     try:
@@ -410,6 +427,8 @@ def fs_ai_job(req: AIReviewRequest):
     job = {"status": "running", "done": 0, "total": 0, "result": None, "error": None,
            "cancel": threading.Event(), "started": time.time()}
     with JOBS_LOCK:  # 数数量和登记新任务放在同一把锁里：同时点几次也不会超过上限
+        if UPDATING.is_set():  # 和更新共用这把锁：要么更新看见这个任务，要么这里看见更新
+            return {"error": "程序正在更新，马上会重启，请稍等再试"}
         running = sum(1 for j in JOBS.values() if j["status"] == "running")
         if running >= MAX_JOBS:
             return {"error": f"已经有 {running} 个 AI 审查正在进行，请等它们完成或取消后再开始新的。"}
@@ -485,7 +504,13 @@ def _is_ours(port: int) -> bool:
 def main():
     import uvicorn
 
-    port = int(os.environ.get("PORT", "8765"))
+    try:
+        port = int(os.environ.get("PORT", "8765"))
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except ValueError:
+        print(f"环境变量 PORT 的值不对（{os.environ.get('PORT')!r}），改用默认端口 8765")
+        port = 8765
     # 更新后重启时，旧进程刚退出，端口可能还要几秒才释放，等一等
     wait = 15 if os.environ.get("CODECHECK_NO_BROWSER") else 3
     for _ in range(wait * 2):

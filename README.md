@@ -70,12 +70,14 @@ pip install -r requirements.txt
 ## 用法一：命令行
 
 ```bash
-python -m codecheck examples/buggy.py
+python -m codecheck examples/buggy.py                  # 示例：拼错变量名
+python -m codecheck examples/divide.py                 # 示例：除以零
 python -m codecheck examples/buggy.js --ai none        # 不用 AI，速度快
 python -m codecheck 我的代码.py --input "5\n3"          # 给程序喂输入
 python -m codecheck 我的代码.py --explain-lang English  # 用英文讲解
 python -m codecheck 我的代码.py --json                  # 输出 JSON，给其他程序调用
 python -m codecheck 我的代码.py --tests                 # 让 AI 生成测试并运行
+python -m codecheck 我的代码.py --tests --allow-risky-tests 2,5   # 看过后，允许运行被拦下的第 2、5 个测试
 python -m codecheck D:\我的项目                          # 检查整个文件夹
 python -m codecheck D:\我的项目 --ai-review              # 再让 AI 审查整个项目
 python -m codecheck D:\我的项目 --ai-recheck             # AI 复查：上次的问题解决了没有
@@ -110,6 +112,7 @@ python -m codecheck.web.server
 
 - **AI 写的测试**：运行前会先扫描测试代码。里面有删除文件、联网、执行命令之类的操作时，**先不运行**，
   把测试代码给你看，你确认后才运行（防止被检查的代码里藏着恶意说明，诱导 AI 写出有害的测试）。
+  可以只放行你看过的那一个测试，其他有风险的仍然不运行。
 
 其他保护：
 
@@ -128,6 +131,7 @@ python -m codecheck.web.server
   真正的签名需要有人长期保管一把私钥、每次发布时签名，对这个个人项目来说代价太大，所以没有做。
   请给 GitHub 账号开启两步验证，并且不要把仓库的写权限给别人。
   不想自动更新的话，把 `update_source.txt` 清空即可。
+  下载的更新包有大小限制（下载最大 30MB、解压后最大 100MB），正在更新时不会再开始新的检查或审查。
 - **本机运行不是沙盒**（见上一节）。
 
 ## 项目结构

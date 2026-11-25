@@ -75,10 +75,21 @@ def _gen_tests(a, code: str) -> dict:
                              source_path=None if a.file == "-" else os.path.abspath(a.file))
         t = testgen.run(code, g["tests"], g["language"], a.timeout, a.sandbox,
                         source_path=None if a.file == "-" else os.path.abspath(a.file),
-                        allow_risky=a.allow_risky_tests)
+                        allow_risky=_allowed_tests(a.allow_risky_tests))
         return {"summary": g["summary"], **t}
     except Exception as e:
         return {"error": str(e)}
+
+
+def _allowed_tests(value):
+    if value is None:
+        return False
+    if value == "all":
+        return True
+    try:
+        return [int(x) for x in value.replace("，", ",").split(",") if x.strip()]
+    except ValueError:
+        sys.exit("--allow-risky-tests 后面要写测试编号，比如 2,5")
 
 
 def _folder_mode(a) -> int:
@@ -128,8 +139,9 @@ def main(argv=None):
     p.add_argument("--explain-lang", default="简体中文", choices=EXPLAIN_LANGS, help="AI 讲解使用的语言（默认简体中文）")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     p.add_argument("--tests", action="store_true", help="让 AI 生成测试并逐个运行")
-    p.add_argument("--allow-risky-tests", action="store_true",
-                   help="AI 写的测试里有删除文件、联网、执行命令等操作时也运行（默认跳过，请先看过测试代码）")
+    p.add_argument("--allow-risky-tests", nargs="?", const="all", default=None, metavar="编号",
+                   help="放行有读写文件、联网、执行命令等操作的 AI 测试（默认跳过）。"
+                        "后面写编号（如 2,5）只放行这几个；只写参数名则全部放行。请先看过测试代码")
     p.add_argument("--ai-review", action="store_true", help="检查文件夹时，再让 AI 审查整个项目")
     p.add_argument("--ai-recheck", action="store_true", help="AI 复查：上次 AI 审查的问题解决了没有")
     a = p.parse_args(argv)
@@ -193,6 +205,9 @@ def main(argv=None):
 
     if a.tests:
         print(color("\n━━ AI 生成测试 ━━", "bold"))
+        if a.sandbox == "local":
+            print(color("注意：测试代码是 AI 写的，会在你的电脑上运行（本机不隔离）。检查别人的代码时，建议加 --sandbox docker。",
+                        "yellow"))
         t = _gen_tests(a, code)
         if "error" in t:
             print(color("生成测试失败：" + t["error"], "yellow"))

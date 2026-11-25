@@ -174,10 +174,15 @@ ORDER = {"high": 0, "medium": 1, "low": 2}
 ISSUE_KEYS = ("file", "line", "severity", "category", "title", "explanation", "suggestion")
 
 
-def _save(folder_path: str, issues: list[dict], overview: str, prints: dict, pending: list[str]):
+def _save(folder_path: str, issues: list[dict], overview: str, prints: dict, pending: list[str]) -> str:
+    """保存这次的结果（给下次复查用）。失败时返回提示文字：结果照样返回给用户，花掉的额度不会白费。"""
     keep = [{k: i[k] for k in ISSUE_KEYS} for i in issues]
-    store.put("review", folder_path, {"time": store.now(), "overview": overview, "issues": keep,
-                                      "prints": prints, "pending": sorted(set(pending))})
+    try:
+        store.put("review", folder_path, {"time": store.now(), "overview": overview, "issues": keep,
+                                          "prints": prints, "pending": sorted(set(pending))})
+        return ""
+    except OSError as e:
+        return f"注意：这次的结果没能保存（{e}），下次没法用它来复查。可以检查一下程序文件夹能不能写入。"
 
 
 def last_review(path: str) -> dict | None:
@@ -265,14 +270,14 @@ def _run_batches(batches, make_prompt, schema, explain_lang, backend, progress, 
     return done, failed, used_backend
 
 
-def _summarize(overviews: list[str], issues: list[dict], explain_lang: str, backend: str) -> dict:
+def _summarize(overviews: list[str], issues: list[dict], explain_lang: str, backend: str, cancel=None) -> dict:
     """多批审查后，让 AI 根据各批的概况和问题清单写整体总结；失败时退回简单拼接。"""
     lines = [f"第 {n} 批概况：{o}" for n, o in enumerate(overviews, 1)]
     lines.append("\n全部问题：")
     lines += [f"- [{i['severity']}/{i['category']}] {i['file']}：{i['title']}" for i in issues[:300]]
     try:
         _, data = ai.structured(SUMMARY_SYSTEM.format(explain_lang=explain_lang), "\n".join(lines),
-                                SUMMARY_SCHEMA, backend, timeout=600)
+                                SUMMARY_SCHEMA, backend, timeout=600, cancel=cancel)
         return data
     except Exception:
         return {"overview": " ".join(overviews[:3]), "strengths": [],
@@ -321,7 +326,7 @@ def review(path: str, explain_lang: str = "简体中文", backend: str = "auto",
     _attach_paths(issues, scan)
 
     if total > 1 and not cancelled:
-        summary = _summarize(overviews, issues, explain_lang, used or backend)
+        summary = _summarize(overviews, issues, explain_lang, used or backend, cancel)
     elif total > 1:
         summary = {"overview": " ".join(overviews[:3]), "strengths": strengths[:3], "next_steps": next_steps[:3]}
     else:
@@ -335,7 +340,7 @@ def review(path: str, explain_lang: str = "简体中文", backend: str = "auto",
         issues = sorted(old_issues + issues, key=lambda i: ORDER.get(i["severity"], 3))
         prints = {**(last.get("prints") or {}), **prints}
         summary["overview"] = last.get("overview") or summary["overview"]
-    _save(scan["folder"], issues, summary["overview"], prints, failed_files + unreadable)
+    save_note = _save(scan["folder"], issues, summary["overview"], prints, failed_files + unreadable)
 
     reviewed = [f["rel"] for i, _, _, _ in done for f in batches[i]]
     if cancelled:
@@ -345,7 +350,8 @@ def review(path: str, explain_lang: str = "简体中文", backend: str = "auto",
             "batches": total, "failed_batches": [{"index": i + 1, "error": e} for i, e in sorted(failed)],
             "pending": sorted(set(failed_files + unreadable)),
             "pending_groups": folder.group_by_dir(failed_files + unreadable),
-            "skipped": [], "skipped_groups": [], "ai_backend": used, "mode": mode}
+            "skipped": [], "skipped_groups": [], "ai_backend": used, "mode": mode,
+            "warnings": [save_note] if save_note else []}
 
 
 # ---------- AI 复查：上次的问题解决了吗 ----------
@@ -417,7 +423,8 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
     for i in previous:
         rel = _norm(i["file"])
         if rel not in existing:
-            status[i["k"]] = {"status": "unclear", "note": "这个文件已经不在了（被删除、改名或被排除）。", "line": 0}
+            status[i["k"]] = {"status": "unclear", "note": "这个文件已经不在了（被删除、改名或被排除），"
+                              "这次没法判断；下次复查不再列出这一条。", "line": 0}
         elif old_prints and old_prints.get(rel) == now_prints.get(rel):
             status[i["k"]] = {"status": "not_fixed", "note": UNCHANGED_NOTE, "line": i["line"]}
 
@@ -482,13 +489,15 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
     new_issues.sort(key=lambda i: ORDER.get(i["severity"], 3))
 
     failed_files = [f["rel"] for i, _ in failed for f in batches[i]]
-    still = [i for i in result_prev if i["status"] in ("partial", "not_fixed", "unclear")]
+    # 记下还要处理的问题给下次复查；文件已经不在的问题不再记（否则每次都显示“无法判断”，永远清不掉）
+    still = [i for i in result_prev if i["status"] in ("partial", "not_fixed", "unclear")
+             and _norm(i["file"]) in existing]
     overview = " ".join(overviews[:3]) if overviews else "这次没有文件需要重新审查：上次有问题的文件都没有改动。"
     # 还没审完的文件：只记这次仍然失败或读不到的。上次没审完的文件这次已经被选进来审过了，
     # 不能再原样写回去（否则每次复查都会重复发送，界面也一直显示“没审完”）
     still_pending = failed_files + unreadable
-    _save(scan["folder"], still + new_issues, overview, {**prints, **now_prints} if not failed else prints,
-          still_pending)
+    save_note = _save(scan["folder"], still + new_issues, overview,
+                      {**prints, **now_prints} if not failed else prints, still_pending)
 
     counts = {k: sum(1 for i in result_prev if i["status"] == k) for k in ("fixed", "partial", "not_fixed", "unclear")}
     if cancelled:
@@ -499,7 +508,8 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
             "unchanged": scan["total"] - len(files),
             "failed_batches": [{"index": i + 1, "error": e} for i, e in sorted(failed)],
             "pending": sorted(set(still_pending)), "pending_groups": folder.group_by_dir(still_pending),
-            "skipped": [], "skipped_groups": [], "ai_backend": used}
+            "skipped": [], "skipped_groups": [], "ai_backend": used,
+            "warnings": [save_note] if save_note else []}
 
 
 STATUS = {"fixed": "✅ 已解决", "partial": "⚠️ 部分解决", "not_fixed": "❌ 未解决", "unclear": "❔ 无法判断"}
