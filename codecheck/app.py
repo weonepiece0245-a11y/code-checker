@@ -7,6 +7,7 @@
 会改用 Edge 的“应用模式”打开一个没有地址栏的独立窗口；再不行才用普通浏览器。
 关闭窗口后程序自动退出。日志写在 app.log。
 """
+import html
 import os
 import socket
 import subprocess
@@ -154,8 +155,8 @@ def _run_webview(port: int) -> bool:
                 _mark_ready()
             except Exception as e:
                 print("启动失败：", e)
-                win.load_html(f"<body style='font:16px system-ui;padding:40px'>启动失败：{e}"
-                              "<br><br>请把这个窗口截图发给 Claude。</body>")
+                win.load_html("<body style='font:16px system-ui;padding:40px'>启动失败："
+                              + html.escape(str(e)) + "<br><br>请把这个窗口截图发给 Claude。</body>")
                 _mark_ready()
 
         try:

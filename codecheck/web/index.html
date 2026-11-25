@@ -830,6 +830,10 @@ async function genTests() {
   if (!code.trim()) { testsBusy("请先输入代码。"); return; }
   const aiChoice = aiChoiceFor("AI 生成测试");
   if (!aiChoice) return;
+  if (!$("run").checked) {
+    if (!confirm("“AI 生成测试”需要真的运行代码，但设置里没有勾选“运行代码”。\n\n要勾上“运行代码”并继续吗？")) return;
+    $("run").checked = true; updateRunWarn();
+  }
   if (!confirmLocalRun("运行 AI 写的测试")) return;
   $("gentests").disabled = true;
   testsBusy("AI 正在读代码、设计测试，大约需要 10~40 秒…");
@@ -845,13 +849,13 @@ async function genTests() {
     $("testsout").innerHTML = '<p style="color:var(--err)">生成测试失败：' + esc(e.message) + '</p>';
   } finally { $("gentests").disabled = false; }
 }
-async function runTests() {
+async function runTests(allowRisky) {
   if (!lastTests) return;
   testsBusy("正在逐个运行测试…");
   try {
     const r = await post("/api/tests/run", {code: $("code").value, language: lastTests.language,
       tests: lastTests.tests, timeout: +$("timeout").value || 5, sandbox: $("sandbox").value,
-      source_path: curFile ? curFile.path : null});
+      source_path: curFile ? curFile.path : null, allow_risky: allowRisky === true});
     if (r.error) throw new Error(r.error);
     renderTests(r);
   } catch (e) {
@@ -865,6 +869,10 @@ function renderTests(r) {
   setBadge("testsout", all ? "ok" : "bad", `${r.passed}/${r.total}`);
   markNew("testsout");
   let h = `<h2>测试结果 <span class="badge ${all ? "ok" : "bad"}">${r.passed} / ${r.total} 通过</span></h2>`;
+  if (r.skipped) h += `<div class="cmp" style="border-color:var(--warn)">⚠️ 有 <b>${r.skipped}</b> 个测试里有删除文件、联网、执行命令之类的操作，<b>为了安全没有运行</b>（下面标了 ⚠ 的）。
+      <div style="font-size:13px;margin-top:4px">AI 写的测试一般不需要这些操作；如果被检查的代码里藏了恶意的说明文字，AI 可能被诱导写出有害的测试。
+      请先看一下这些测试代码，确认没问题再运行。</div>
+      <p style="margin:6px 0 0"><button class="ghost" id="runrisky">我看过了，也运行这 ${r.skipped} 个测试</button></p></div>`;
   h += `<div class="bar"><i style="width:${pct}%"></i></div>`;
   h += `<p class="muted" style="margin:0 0 8px">代码的用途：${esc(lastTests.summary)}</p>`;
   h += `<div class="row" style="margin:0 0 6px"><button class="ghost" id="rerun">用当前代码重新运行这些测试</button>
@@ -873,6 +881,11 @@ function renderTests(r) {
   r.results.forEach((t, i) => {
     const what = t.kind === "call" ? `<div class="kv"><b>测试代码</b><pre>${esc(t.code)}</pre></div>`
       : `<div class="kv"><b>输入</b><pre>${esc(t.stdin) || "（无）"}</pre></div>`;
+    if (t.skipped) {
+      h += `<details class="test fail" open><summary><span class="mark" style="color:var(--warn)">⚠</span><span>${i + 1}. ${esc(t.name)}（没有运行）</span></summary>
+        <div class="purpose">测试里有${esc(t.risk)}的操作，为了安全先没运行。</div>${what}</details>`;
+      return;
+    }
     const actual = t.timed_out ? "超时（可能有死循环；如果是函数测试，也可能是顶层代码卡住了）" : (t.actual_output.trim() || "（无输出）");
     h += `<details class="test ${t.passed ? "pass" : "fail"}" ${t.passed ? "" : "open"}>
       <summary><span class="mark">${t.passed ? "✓" : "✗"}</span><span>${i + 1}. ${esc(t.name)}</span></summary>
@@ -880,11 +893,15 @@ function renderTests(r) {
       <div class="kv"><b>期望输出</b>${t.expect_error ? "（应该报错）" : ""}<pre>${esc(t.expected_output.trim()) || "（无输出）"}</pre></div>
       <div class="kv"><b>实际输出</b><pre>${esc(actual)}</pre></div>
       ${t.error_line ? `<div class="kv"><b>报错</b><pre style="color:var(--err)">${esc(t.error_line)}</pre></div>` : ""}
+      ${!t.passed && (t.load_errors || []).length ? `<div class="kv"><b>加载代码时出了错（可能是测试失败的原因）</b><pre style="color:var(--warn)">${t.load_errors.map(esc).join("\n")}</pre></div>` : ""}
     </details>`;
   });
   $("testsout").innerHTML = h;
-  $("rerun").onclick = runTests;
+  $("rerun").onclick = () => runTests(false);
   $("regen").onclick = genTests;
+  if ($("runrisky")) $("runrisky").onclick = () => {
+    if (confirm("确定要运行这些含有危险操作的测试吗？它们会在“设置”里选的运行方式下运行。")) runTests(true);
+  };
 }
 $("gentests").onclick = genTests;
 

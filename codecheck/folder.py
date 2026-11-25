@@ -190,7 +190,10 @@ def scan(folder: str, exclude: list[str] | None = None, compare: bool = True) ->
         "dirs": dir_summary(out),
     }
     if compare:
-        result["compare"] = compare_with_last(result)
+        try:
+            result["compare"] = compare_with_last(result)
+        except Exception:  # 对比只是附加信息，出任何问题都不能让检查失败
+            result["compare"] = None
     result["copy_warning"] = copy_warning(folder)
     return result
 
@@ -222,7 +225,10 @@ def compare_with_last(r: dict) -> dict | None:
     now_items = _keys(r["files"])
     now_files = sorted(f["rel"].replace("\\", "/") for f in r["files"])
     last = store.get("scan", r["folder"])
-    store.put("scan", r["folder"], {"time": store.now(), "items": now_items, "files": now_files})
+    try:
+        store.put("scan", r["folder"], {"time": store.now(), "items": now_items, "files": now_files})
+    except OSError:
+        pass  # 存不了检查记录（比如磁盘满、没有写权限）只影响下次对比，不能让这次检查失败
     if not last:
         return None
     # 只比较两次都检查过的文件：
@@ -249,7 +255,9 @@ def compare_with_last(r: dict) -> dict | None:
             "left_out_files": len(left_out), "newly_in_files": len(newly_in),
             "resolved": lst(gone, line_old), "new": lst(added, line_new),
             "resolved_count": sum(gone.values()), "new_count": sum(added.values()),
-            "remaining_count": len(now_items) - sum(added.values())}
+            # 还剩：两次都检查过的文件里、这次仍然有的问题（新加入的文件里的问题不算“还剩”）
+            "remaining_count": sum(1 for x in now_items if last_files is None or x[0] in last_files)
+                               - sum(added.values())}
 
 
 def format_report(r: dict) -> str:

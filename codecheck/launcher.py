@@ -127,7 +127,10 @@ def work(ui: Splash):
     # 1. 自动更新留下的新版启动文件，现在没人在运行它，可以直接替换
     new_bat = ROOT / (BAT.name + ".new")
     if new_bat.exists():
-        os.replace(new_bat, BAT)
+        try:
+            os.replace(new_bat, BAT)
+        except OSError:
+            pass  # 文件被占用等：这次先不换，下次启动再换；不影响打开程序
     refresh_shortcut()
 
     # 2. 检查更新

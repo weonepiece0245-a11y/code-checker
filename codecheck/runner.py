@@ -322,31 +322,59 @@ def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: in
     return RunResult(None if timed_out else code, _clip(out), _clip(err), dur, timed_out, "local", note)
 
 
+_PULLED: set[str] = set()
+
+
+def _ensure_image(image: str) -> str:
+    """确认 Docker 运行环境已经下载好；第一次用时先下载（可能要几分钟），不算进代码的运行时间。"""
+    if image in _PULLED:
+        return ""
+    r = subprocess.run(["docker", "image", "inspect", image], capture_output=True, creationflags=NO_WINDOW, timeout=30)
+    if r.returncode == 0:
+        _PULLED.add(image)
+        return ""
+    try:
+        p = subprocess.run(["docker", "pull", image], capture_output=True, text=True, creationflags=NO_WINDOW,
+                           timeout=900, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"下载 Docker 运行环境 {image} 超时，请检查网络后再试") from None
+    if p.returncode != 0:
+        raise RuntimeError(f"下载 Docker 运行环境 {image} 失败：" + (p.stderr or p.stdout).strip()[-300:])
+    _PULLED.add(image)
+    return f"（第一次使用，已下载 Docker 运行环境 {image}）"
+
+
 def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: int,
                extra_args: list | None = None) -> RunResult:
     if not shutil.which("docker"):
         raise RuntimeError("没有安装 Docker")
+    pulled_note = _ensure_image(lang.docker_image)
     folder, fname = os.path.split(path)
     inner = [part.replace("{file}", f"/code/{fname}") for part in lang.run_cmd]
     inner += [f"/code/{a}" for a in (extra_args or [])]
     import uuid
     name = f"codecheck-{uuid.uuid4().hex[:12]}"
-    # 容器里也套一层 timeout，到时间就在容器内部结束（退出码 137），容器随之停止并被 --rm 删除
+    # 容器里也套一层 timeout：到时间先请程序结束（退出码 124），2 秒后还不结束就强制结束（137）
     cmd = ["docker", "run", "--rm", "-i", "--name", name, "--network", "none", f"--memory={memory_mb}m",
            "--cpus=1", "--pids-limit=64", "--read-only", "--tmpfs", "/tmp:size=16m",
            "-v", f"{folder}:/code:ro", "-w", "/tmp", lang.docker_image,
-           "timeout", "-s", "KILL", str(timeout), *inner]
+           "timeout", "-s", "TERM", "-k", "2", str(timeout), *inner]
     start = time.monotonic()
     try:
-        p = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=timeout + 20,
+        p = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=timeout + 30,
                            creationflags=NO_WINDOW, encoding="utf-8", errors="replace")
         dur = int((time.monotonic() - start) * 1000)
         if p.returncode == 125:
             raise RuntimeError("Docker 启动失败：" + p.stderr.strip())
-        if p.returncode == 137:
+        # 只有确实跑满了时间，124 / 137 才算“超时”；没跑满就 137，多半是内存超限被系统结束；
+        # 程序自己用 124 退出（极少见）也不会被误判
+        ran_full = dur >= timeout * 1000
+        if p.returncode in (124, 137) and ran_full:
             return RunResult(None, _clip(p.stdout), _clip(p.stderr), dur, True, "docker",
-                             f"超过 {timeout} 秒被强制停止（可能是死循环、在等待输入，或内存超限）")
-        return RunResult(p.returncode, _clip(p.stdout), _clip(p.stderr), dur, False, "docker")
+                             (f"超过 {timeout} 秒被强制停止（可能是死循环或在等待输入）" + pulled_note).strip())
+        note = "进程被强制结束（多半是内存超限）" if p.returncode == 137 else ""
+        return RunResult(p.returncode, _clip(p.stdout), _clip(p.stderr), dur, False, "docker",
+                         (note + pulled_note).strip())
     except subprocess.TimeoutExpired as e:
         # 本机的 docker 命令超时只会结束客户端，容器本身要单独停掉
         subprocess.run(["docker", "kill", name], capture_output=True, creationflags=NO_WINDOW, timeout=30)

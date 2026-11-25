@@ -199,13 +199,17 @@ def check_javascript(path: str) -> list[Issue]:
                                env={**os.environ, "ESLINT_USE_FLAT_CONFIG": "true"})
         except (subprocess.TimeoutExpired, OSError):
             return issues + [Issue(0, 0, "tool", "eslint 运行失败或超时，跳过了 eslint 检查", "warning")]
+        # eslint 退出码：0 = 没问题，1 = 找到问题，2 = 自己出错了（多半是配置文件有问题）
+        if r.returncode not in (0, 1) or not (r.stdout or "").strip().startswith("["):
+            detail = ((r.stderr or r.stdout or "").strip().splitlines() or ["未知原因"])[0][:200]
+            return issues + [Issue(0, 0, "tool", f"eslint 运行出错，跳过了 eslint 检查（{detail}）", "warning")]
         try:
-            for f in json.loads(r.stdout or "[]"):
+            for f in json.loads(r.stdout):
                 for m in f.get("messages", []):
                     issues.append(Issue(m.get("line", 0), m.get("column", 0), m.get("ruleId") or "eslint",
                                         m["message"], "error" if m.get("severity") == 2 else "warning"))
-        except json.JSONDecodeError:
-            pass
+        except (json.JSONDecodeError, TypeError, KeyError):
+            issues.append(Issue(0, 0, "tool", "eslint 的输出无法解析，跳过了 eslint 检查", "warning"))
     return issues
 
 

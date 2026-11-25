@@ -202,6 +202,15 @@ def _via_cli(system: str, user: str) -> str:
     return _run_claude(system, user, 300, ["--output-format", "text"]).strip()
 
 
+_LOGIN_HINTS = ("login", "log in", "logged in", "not authenticated", "authentication", "unauthorized",
+                "invalid api key", "oauth", "subscription", "credentials", "未登录", "登录")
+
+
+def _is_login_error(message: str) -> bool:
+    m = message.lower()
+    return any(h in m for h in _LOGIN_HINTS)
+
+
 def _with_fallback(choice: str, call_cli, call_api) -> tuple[str, object]:
     """按选择调用 AI。自动模式下 Claude Code 调用失败（没登录、订阅过期……）且设置了 API key 时，改用 API key 再试。"""
     backend = pick_backend(choice)
@@ -213,7 +222,9 @@ def _with_fallback(choice: str, call_cli, call_api) -> tuple[str, object]:
         except InterruptedError:
             raise
         except RuntimeError as e:
-            if choice == "auto" and has_api_key() and "超时" not in str(e):
+            # 只有“Claude Code 没登录 / 登录失效 / 订阅不可用”时才改用 API key（会按量计费，结果里会标明）；
+            # 其他错误（网络、额度用完、内容问题……）照常报出来，不悄悄换成付费的方式
+            if choice == "auto" and has_api_key() and _is_login_error(str(e)):
                 return "api", call_api()
             raise
     if backend == "none":

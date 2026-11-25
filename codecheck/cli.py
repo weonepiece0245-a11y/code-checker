@@ -66,13 +66,16 @@ def _ai(a) -> str:
 def _gen_tests(a, code: str) -> dict:
     """生成测试并运行；失败时返回 {"error": ...}。"""
     from . import testgen
+    if a.no_run:  # 测试一定要运行代码：用户说了不运行，就不能偷偷运行
+        return {"error": "生成测试需要运行代码，但你加了 --no-run。去掉 --no-run 再试。"}
     try:
         # 用和检查时一样的语言（看文件后缀），不要让生成测试时再从代码特征去猜
         lang_key = a.lang or detect(None if a.file == "-" else a.file, code).key
         g = testgen.generate(code, lang_key, a.explain_lang, _ai(a),
                              source_path=None if a.file == "-" else os.path.abspath(a.file))
         t = testgen.run(code, g["tests"], g["language"], a.timeout, a.sandbox,
-                        source_path=None if a.file == "-" else os.path.abspath(a.file))
+                        source_path=None if a.file == "-" else os.path.abspath(a.file),
+                        allow_risky=a.allow_risky_tests)
         return {"summary": g["summary"], **t}
     except Exception as e:
         return {"error": str(e)}
@@ -125,6 +128,8 @@ def main(argv=None):
     p.add_argument("--explain-lang", default="简体中文", choices=EXPLAIN_LANGS, help="AI 讲解使用的语言（默认简体中文）")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     p.add_argument("--tests", action="store_true", help="让 AI 生成测试并逐个运行")
+    p.add_argument("--allow-risky-tests", action="store_true",
+                   help="AI 写的测试里有删除文件、联网、执行命令等操作时也运行（默认跳过，请先看过测试代码）")
     p.add_argument("--ai-review", action="store_true", help="检查文件夹时，再让 AI 审查整个项目")
     p.add_argument("--ai-recheck", action="store_true", help="AI 复查：上次 AI 审查的问题解决了没有")
     a = p.parse_args(argv)

@@ -7,6 +7,7 @@
 """
 import json
 import os
+import re
 import tempfile
 
 from . import ai, runner, textio
@@ -83,12 +84,21 @@ sys.modules["__main__"] = mod
 ns = mod.__dict__
 
 def is_main_guard(node):
-    return (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
-            and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__")
+    # if __name__ == "__main__":、if "__main__" == __name__:、if __name__ == "__main__" and ...: 都算
+    if not isinstance(node, ast.If):
+        return False
+    for sub in ast.walk(node.test):
+        if isinstance(sub, ast.Compare):
+            parts = [sub.left, *sub.comparators]
+            if any(isinstance(p, ast.Name) and p.id == "__name__" for p in parts) and \
+                    any(isinstance(p, ast.Constant) and p.value == "__main__" for p in parts):
+                return True
+    return False
 
 # 一条一条地运行顶层语句（某条出错不影响后面的函数定义），顶层的输出全部丢掉。
 # from __future__ 的设置要带到后面每一条语句的编译里，否则会失效
 flags = 0
+load_errors = []
 real_stdin = sys.stdin
 sys.stdin = io.StringIO("")
 for node in ast.parse(src, fname).body:
@@ -105,9 +115,13 @@ for node in ast.parse(src, fname).body:
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             code = compile(ast.Module(body=[node], type_ignores=[]), fname, "exec", flags=flags, dont_inherit=True)
             exec(code, ns)
-    except BaseException:
-        pass
+    except BaseException as e:
+        # 顶层代码出错不影响后面的函数定义；但记下来（最多 3 条），测试失败时告诉用户可能的原因
+        if len(load_errors) < 3 and not isinstance(e, (EOFError, SystemExit, KeyboardInterrupt)):
+            load_errors.append(f"第 {node.lineno} 行：{type(e).__name__}: {e}")
 sys.stdin = real_stdin
+for msg in load_errors:
+    sys.stderr.write("[codecheck-load] " + msg + "\n")
 exec(compile(test, "test.py", "exec", dont_inherit=True), ns)
 '''
 
@@ -139,7 +153,10 @@ const ctx = vm.createContext({
   clearTimeout: noop, clearInterval: noop, clearImmediate: noop,
   console: quiet, process: fakeProcess,
 });
-try { vm.runInContext(src, ctx, { filename: source }); } catch (e) {}
+try { vm.runInContext(src, ctx, { filename: source }); } catch (e) {
+  // 不悄悄吞掉：告诉用户加载代码时出了什么错（比如 ES 模块的 import 语法这里不支持）
+  process.stderr.write("[codecheck-load] " + String(e && e.message || e).split("\n")[0] + "\n");
+}
 
 // 等加载阶段排队的 Promise 回调跑完（仍然是静音状态），再恢复真正的 console 等，运行测试
 setImmediate(() => {
@@ -150,6 +167,35 @@ setImmediate(() => {
 
 HARNESS = {"python": ("harness.py", PY_HARNESS), "javascript": ("harness.js", JS_HARNESS)}
 PRINT_FN = {"python": "print()", "javascript": "console.log()"}
+
+
+# 测试代码里出现这些操作，就先不运行，交给用户确认（防止被检查的代码里藏着“提示注入”，
+# 诱导 AI 写出删除文件、联网、执行命令的测试）
+_RISKY = {
+    "python": [
+        (r"\bos\.(remove|unlink|rmdir|removedirs|rename|replace|system|popen|kill|chmod|chown|exec\w*|spawn\w*)\b", "删除/改动文件或执行命令"),
+        (r"\bshutil\.(rmtree|move|copy\w*|chown)\b", "删除/移动/复制文件"),
+        (r"\b(subprocess|ctypes|importlib|pty|signal)\b", "执行外部命令或调用系统底层"),
+        (r"\b(socket|urllib|requests|httpx|http\.client|ftplib|smtplib|telnetlib|webbrowser)\b", "联网"),
+        (r"\b(eval|exec|compile|__import__)\s*\(", "动态执行代码"),
+        (r"\bopen\s*\([^)]*['\"][^'\"]*[wax+][^'\"]*['\"]", "写入文件"),
+        (r"\.(write_text|write_bytes|unlink|rmdir|rename|replace|touch|mkdir|chmod)\s*\(", "写入/删除文件"),
+    ],
+    "javascript": [
+        (r"\bchild_process\b|\b(exec|execSync|spawn|spawnSync|fork)\s*\(", "执行外部命令"),
+        (r"\bfs\w*\.(unlink|rm|rmdir|writeFile|appendFile|rename|copyFile|mkdir|chmod|symlink|truncate)\w*\s*\(", "写入/删除文件"),
+        (r"require\s*\(\s*['\"](fs|fs/promises|child_process|net|http|https|dgram|tls|os|vm|worker_threads)['\"]\s*\)", "使用文件、网络或系统模块"),
+        (r"\bprocess\.(kill|exit|chdir)\b", "操作进程"),
+        (r"\b(eval|Function)\s*\(|\bfetch\s*\(|\bXMLHttpRequest\b|\bWebSocket\b", "动态执行代码或联网"),
+    ],
+}
+
+
+def risk_of(test: dict, lang_key: str) -> str:
+    """测试代码里有没有危险操作；有的话返回说明，没有返回空字符串。"""
+    code = test.get("code") or ""
+    found = [why for pat, why in _RISKY.get(lang_key, []) if re.search(pat, code)]
+    return "、".join(dict.fromkeys(found))
 
 
 def _siblings(source_path: str | None) -> str:
@@ -172,12 +218,21 @@ def _siblings(source_path: str | None) -> str:
             "不要假设它们不存在：\n" + "、".join(names[:60] + [d + "/" for d in dirs[:30]]) + more)
 
 
+def _is_esm(code: str, source_path: str | None) -> bool:
+    if source_path and source_path.lower().endswith(".mjs"):
+        return True
+    return bool(re.search(r"^\s*(import\s.+\sfrom\s|import\s+['\"]|export\s)", code, re.M))
+
+
 def generate(code: str, language: str | None = None, explain_lang: str = "简体中文",
              backend: str = "auto", source_path: str | None = None) -> dict:
     lang = LANGUAGES[language] if language else detect(source_path, code)
     numbered = textio.number_lines(code)
     system = SYSTEM.format(language=lang.name, print_fn=PRINT_FN[lang.key], explain_lang=explain_lang)
     user = f"代码（带行号，行号不是代码的一部分）：\n{ai.fence(numbered)}" + _siblings(source_path)
+    if lang.key == "javascript" and _is_esm(code, source_path):
+        user += ("\n\n注意：这段代码是 ES 模块（用了 import/export），系统没法单独加载里面的函数，"
+                 "所以【只能】设计 kind = \"program\" 的测试（运行整个程序、比较输出）。")
     used, data = ai.structured(system, user, SCHEMA, backend)
     data["language"] = lang.key
     data["ai_backend"] = used
@@ -189,7 +244,7 @@ def _norm(s: str) -> str:
 
 
 def run(code: str, tests: list[dict], language: str | None = None, timeout: int = 5,
-        sandbox: str = "local", source_path: str | None = None) -> dict:
+        sandbox: str = "local", source_path: str | None = None, allow_risky: bool = False) -> dict:
     """source_path：代码对应的真实文件。给了它，测试就和正常检查一样在原位置运行（能 import 同目录模块）。"""
     lang = LANGUAGES[language] if language else detect(source_path, code)
     if sandbox == "docker" or (source_path and not os.path.isfile(source_path)):
@@ -207,6 +262,12 @@ def run(code: str, tests: list[dict], language: str | None = None, timeout: int 
             f.write(h_src)
         test_path = os.path.join(tmp, "test" + lang.suffix)
         for t in tests:
+            risk = risk_of(t, lang.key)
+            if risk and not allow_risky:
+                results.append({**t, "passed": False, "skipped": True, "risk": risk, "error_line": "",
+                                "actual_output": "", "stderr": "", "exit_code": None, "timed_out": False,
+                                "duration_ms": 0, "load_errors": []})
+                continue
             if t.get("kind") == "call":
                 with open(test_path, "w", encoding="utf-8") as f:
                     f.write(t.get("code", ""))
@@ -230,11 +291,16 @@ def run(code: str, tests: list[dict], language: str | None = None, timeout: int 
             stderr = r.stderr
             for p in (h_path, main_path, test_path):
                 stderr = stderr.replace(p, os.path.basename(p))
-            results.append({**t, "passed": passed, "error_line": error_line(stderr) if errored else "", "actual_output": r.stdout, "stderr": stderr[-3000:],
-                            "exit_code": r.exit_code, "timed_out": r.timed_out,
-                            "duration_ms": r.duration_ms})
-    passed = sum(1 for x in results if x["passed"])
-    return {"results": results, "passed": passed, "total": len(results)}
+            # 测试运行器记下的“加载代码时出错”单独拿出来，不和测试本身的报错混在一起
+            load_errors = [ln.split("] ", 1)[1] for ln in stderr.splitlines() if ln.startswith("[codecheck-load] ")]
+            stderr = "\n".join(ln for ln in stderr.splitlines() if not ln.startswith("[codecheck-load] "))
+            results.append({**t, "passed": passed, "skipped": False, "risk": risk,
+                            "error_line": error_line(stderr) if errored else "",
+                            "actual_output": r.stdout, "stderr": stderr[-3000:], "load_errors": load_errors,
+                            "exit_code": r.exit_code, "timed_out": r.timed_out, "duration_ms": r.duration_ms})
+    ran = [x for x in results if not x.get("skipped")]
+    return {"results": results, "passed": sum(1 for x in ran if x["passed"]), "total": len(ran),
+            "skipped": len(results) - len(ran)}
 
 
 def error_line(stderr: str) -> str:
@@ -249,7 +315,14 @@ def error_line(stderr: str) -> str:
 def format_report(data: dict) -> str:
     """给命令行用的文字报告。"""
     lines = [f"共 {data['total']} 个测试，通过 {data['passed']} 个"]
+    if data.get("skipped"):
+        lines.append(f"另有 {data['skipped']} 个测试里有危险操作（删除文件、联网、执行命令等），为了安全没有运行；"
+                     "看过测试代码、确认没问题的话，加 --allow-risky-tests 再运行")
     for i, r in enumerate(data["results"], 1):
+        if r.get("skipped"):
+            lines.append(f"\n⚠ {i}. {r['name']}（没有运行：测试里有{r['risk']}的操作）")
+            lines.append("   测试：" + r["code"].strip().replace("\n", "\n         "))
+            continue
         mark = "✓" if r["passed"] else "✗"
         lines.append(f"\n{mark} {i}. {r['name']}  —  {r['purpose']}")
         if not r["passed"]:
@@ -260,4 +333,6 @@ def format_report(data: dict) -> str:
             lines.append("   实际：" + ("超时" if r["timed_out"] else (r["actual_output"].strip() or "（无输出）")))
             if r["stderr"].strip():
                 lines.append("   报错：" + error_line(r["stderr"]))
+            for le in r.get("load_errors") or []:
+                lines.append("   加载代码时：" + le)
     return "\n".join(lines)

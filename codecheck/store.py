@@ -24,7 +24,7 @@ def get(kind: str, folder: str, default=None):
     try:
         with _lock:
             return json.loads(f.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):  # 文件不存在、损坏、编码不对：都当作没有记录
         return default
 
 

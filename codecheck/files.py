@@ -1,4 +1,9 @@
-"""打开、保存本机文件，以及弹出“选择文件/文件夹”窗口。"""
+"""打开、保存本机文件，以及弹出“选择文件/文件夹”窗口。
+
+只能读写用户自己选过的东西（第二道保险，第一道是网页服务的令牌检查）：
+- 读取：用“打开文件”选过的文件，或“检查文件夹”选过的文件夹里面的文件；
+- 保存：只能保存回之前打开过的文件。
+"""
 import hashlib
 import os
 import shutil
@@ -17,6 +22,40 @@ ALLOWED = set(EXT) | {".txt"}
 # 桌面应用会把这个换成 pywebview 的原生对话框；否则用 tkinter
 PICKER = None
 _lock = threading.Lock()
+
+# 用户选过的文件 / 文件夹，以及打开过的文件（只在这次运行期间有效）
+_allowed_files: set[str] = set()
+_allowed_dirs: set[str] = set()
+_opened: set[str] = set()
+_allow_lock = threading.Lock()
+
+
+def _key(path: str) -> str:
+    return os.path.normcase(os.path.realpath(path))
+
+
+def allow_file(path: str) -> None:
+    with _allow_lock:
+        _allowed_files.add(_key(path))
+
+
+def allow_dir(path: str) -> None:
+    with _allow_lock:
+        _allowed_dirs.add(_key(path))
+
+
+def is_allowed(path: str) -> bool:
+    """这个文件是不是用户选过的（或在用户选过的文件夹里）。"""
+    k = _key(path)
+    with _allow_lock:
+        if k in _allowed_files:
+            return True
+        return any(k == d or k.startswith(d.rstrip(os.sep) + os.sep) for d in _allowed_dirs)
+
+
+# 自动化测试用：启动程序时通过环境变量预先放行一些文件夹（普通使用不需要，也不会设置它）
+for _d in filter(None, os.environ.get("CODECHECK_ALLOW_DIRS", "").split(os.pathsep)):
+    allow_dir(_d)
 
 
 def _tk_pick(kind: str) -> str | None:
@@ -39,9 +78,10 @@ def _tk_pick(kind: str) -> str | None:
 
 def pick(kind: str) -> str | None:
     with _lock:  # 同一时间只弹一个对话框
-        if PICKER:
-            return PICKER(kind)
-        return _tk_pick(kind)
+        path = PICKER(kind) if PICKER else _tk_pick(kind)
+    if path:
+        (allow_dir if kind == "folder" else allow_file)(path)
+    return path
 
 
 def _check_ext(path: str):
@@ -52,11 +92,15 @@ def _check_ext(path: str):
 def read(path: str) -> dict:
     path = os.path.abspath(path)
     _check_ext(path)
+    if not is_allowed(path):
+        raise PermissionError("只能打开你用“打开文件”选过的文件，或“检查文件夹”选过的文件夹里的文件")
     if not os.path.isfile(path):
         raise ValueError("文件不存在")
     if os.path.getsize(path) > MAX_SIZE:
         raise ValueError("文件太大（超过 1MB）")
     ct = textio.read(path)
+    with _allow_lock:
+        _opened.add(_key(path))
     return {"path": path, "name": os.path.basename(path), "content": ct.text, "encoding": ct.encoding,
             "crlf": ct.crlf, "language": EXT.get(Path(path).suffix.lower())}
 
@@ -64,6 +108,10 @@ def read(path: str) -> dict:
 def save(path: str, content: str, encoding: str = "utf-8", crlf: bool = False) -> dict:
     path = os.path.abspath(path)
     _check_ext(path)
+    with _allow_lock:
+        opened = _key(path) in _opened
+    if not opened:
+        raise PermissionError("只能保存回之前打开过的文件")
     if not os.path.isdir(os.path.dirname(path)):
         raise ValueError("文件夹不存在")
     backup = None

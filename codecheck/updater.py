@@ -32,10 +32,16 @@ def _ver(s: str) -> tuple:
     return (nums, 0 if m.group(2).strip() else 1)
 
 
+MAX_DOWNLOAD = 30 * 1024 * 1024  # 更新包最大 30MB（现在大约 0.1MB），超过就当作不正常
+
+
 def _get(url: str, timeout: int) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "codecheck-updater"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+        data = r.read(MAX_DOWNLOAD + 1)
+    if len(data) > MAX_DOWNLOAD:
+        raise ValueError("下载到的内容大得不正常，已放弃这次更新")
+    return data
 
 
 def update_source() -> str:

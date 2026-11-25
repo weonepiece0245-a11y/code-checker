@@ -208,7 +208,7 @@ def preview(path: str, mode: str = "review", exclude: list[str] | None = None) -
     return out
 
 
-def _select(scan: dict, mode: str, last: dict | None) -> list[dict]:
+def _select(scan: dict, mode: str, last: dict | None, now_prints: dict | None = None) -> list[dict]:
     """这次要发送哪些文件。"""
     files = scan["files"]
     if mode == "continue":
@@ -218,7 +218,7 @@ def _select(scan: dict, mode: str, last: dict | None) -> list[dict]:
         old = last.get("prints") or {}
         if not old:  # 旧版本的审查记录没有指纹：只能全部重审
             return files
-        now = _current_prints(scan)
+        now = now_prints if now_prints is not None else _current_prints(scan)
         # 只发改动过的文件、新文件、上次没审完的文件。
         # 没改动的文件里的问题一定还在，直接判为“未解决”，不用再花额度
         pending = {_norm(r) for r in last.get("pending", [])}
@@ -301,7 +301,10 @@ def review(path: str, explain_lang: str = "简体中文", backend: str = "auto",
         return "\n\n".join(head + blocks)
 
     done, failed, used = _run_batches(batches, (SYSTEM, prompt), SCHEMA, explain_lang, backend, progress, cancel)
+    cancelled = cancel is not None and cancel.is_set()
     if not done or all(d[1] is None for d in done):
+        if cancelled:
+            raise InterruptedError("已取消，还没有审完任何一批。")
         reason = failed[0][1] if failed else "没有读到任何文件"
         raise RuntimeError(f"AI 审查失败：{reason}")
 
@@ -317,8 +320,10 @@ def review(path: str, explain_lang: str = "简体中文", backend: str = "auto",
     issues.sort(key=lambda i: ORDER.get(i["severity"], 3))
     _attach_paths(issues, scan)
 
-    if total > 1:
+    if total > 1 and not cancelled:
         summary = _summarize(overviews, issues, explain_lang, used or backend)
+    elif total > 1:
+        summary = {"overview": " ".join(overviews[:3]), "strengths": strengths[:3], "next_steps": next_steps[:3]}
     else:
         summary = {"overview": overviews[0] if overviews else "", "strengths": strengths, "next_steps": next_steps}
 
@@ -333,6 +338,9 @@ def review(path: str, explain_lang: str = "简体中文", backend: str = "auto",
     _save(scan["folder"], issues, summary["overview"], prints, failed_files + unreadable)
 
     reviewed = [f["rel"] for i, _, _, _ in done for f in batches[i]]
+    if cancelled:
+        # 已经审完的部分上面已经保存了（可以“继续审查”），但这次不能当作“审查完成”返回
+        raise InterruptedError(f"已取消。已经审完的 {len(reviewed)} 个文件已保存，可以点“继续审查”接着审剩下的。")
     return {**summary, "issues": issues, "folder": scan["folder"], "reviewed": reviewed,
             "batches": total, "failed_batches": [{"index": i + 1, "error": e} for i, e in sorted(failed)],
             "pending": sorted(set(failed_files + unreadable)),
@@ -399,8 +407,8 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
     if not last or not last.get("issues"):
         raise ValueError("这个文件夹还没有做过 AI 审查，请先点“AI 审查整个文件夹”")
     scan = folder.scan(path, exclude, compare=False)
-    files = _select(scan, "recheck", last)
-    now_prints = _current_prints(scan)
+    now_prints = _current_prints(scan)  # 只算一遍，挑文件和判断“没改动”都用它
+    files = _select(scan, "recheck", last, now_prints)
     old_prints = last.get("prints") or {}
     existing = {_norm(f["rel"]) for f in scan["files"]}
 
@@ -437,7 +445,10 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
                                           explain_lang, backend, progress, cancel)
     elif progress:
         progress(1, 1)
+    cancelled = cancel is not None and cancel.is_set()
     if batches and not done:
+        if cancelled:
+            raise InterruptedError("已取消，还没有复查完任何一批。")
         raise RuntimeError(f"AI 复查失败：{failed[0][1] if failed else '未知原因'}")
 
     new_issues, overviews, next_steps, unreadable = [], [], [], []
@@ -480,6 +491,8 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
           still_pending)
 
     counts = {k: sum(1 for i in result_prev if i["status"] == k) for k in ("fixed", "partial", "not_fixed", "unclear")}
+    if cancelled:
+        raise InterruptedError("已取消。已经复查完的部分已保存，可以之后再点“AI 复查”。")
     return {"mode": "recheck", "last_time": last["time"], "overview": overview, "previous": result_prev,
             "counts": counts, "new_issues": new_issues, "next_steps": next_steps[:5],
             "folder": scan["folder"], "reviewed": [f["rel"] for f in files], "batches": total,
