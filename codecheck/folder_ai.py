@@ -96,7 +96,7 @@ SUMMARY_SYSTEM = """你是一位经验丰富的代码审查员。一个较大的
 
 def _file_block(f: dict, text: str) -> str:
     """一个文件真正要发给 AI 的内容：静态检查结果 + 带行号的代码。"""
-    numbered = "\n".join(f"{n + 1:>4} | {ln}" for n, ln in enumerate(text.split("\n")))
+    numbered = textio.number_lines(text)
     lint = "\n".join(f"  第 {i['line']} 行 [{i['code']}] {i['message']}" for i in f["issues"]) or "  无"
     return f"===== 文件：{f['rel']} =====\n静态检查发现：\n{lint}\n代码：\n{numbered}"
 
@@ -242,7 +242,8 @@ def _run_batches(batches, make_prompt, schema, explain_lang, backend, progress, 
         if not blocks:
             return None, prints, unreadable
         used, data = ai.structured(make_prompt[0].format(explain_lang=explain_lang),
-                                   make_prompt[1](index, batch, blocks), schema, backend, timeout=900)
+                                   make_prompt[1](index, batch, blocks), schema, backend, timeout=900,
+                                   cancel=cancel)
         return (used, data), prints, unreadable
 
     with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, max(1, total))) as pool:
@@ -283,6 +284,7 @@ def _summarize(overviews: list[str], issues: list[dict], explain_lang: str, back
 def review(path: str, explain_lang: str = "简体中文", backend: str = "auto",
            exclude: list[str] | None = None, progress=None, cancel=None, mode: str = "review") -> dict:
     """审查整个文件夹（mode="review"），或继续审查上次没审完的文件（mode="continue"）。"""
+    ai.require_ai(backend)
     scan = folder.scan(path, exclude, compare=False)
     last = last_review(path) if mode == "continue" else None
     files = _select(scan, mode, last)
@@ -392,6 +394,7 @@ UNCHANGED_NOTE = "这个文件和上次审查时完全一样，没有改动，�
 def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto",
             exclude: list[str] | None = None, progress=None, cancel=None) -> dict:
     """只重新审查改动过的文件（以及新文件、上次没审完的文件）；没改动的文件里的问题直接判为“未解决”。"""
+    ai.require_ai(backend)
     last = last_review(path)
     if not last or not last.get("issues"):
         raise ValueError("这个文件夹还没有做过 AI 审查，请先点“AI 审查整个文件夹”")
@@ -437,10 +440,11 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
     if batches and not done:
         raise RuntimeError(f"AI 复查失败：{failed[0][1] if failed else '未知原因'}")
 
-    new_issues, overviews, next_steps = [], [], []
+    new_issues, overviews, next_steps, unreadable = [], [], [], []
     prints = dict(old_prints)
-    for idx, data, pr, _ in done:
+    for idx, data, pr, unr in done:
         prints.update(pr)
+        unreadable += unr
         if not data:
             continue
         allowed = {i["k"] for i in by_batch_prev[idx]}
@@ -469,8 +473,11 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
     failed_files = [f["rel"] for i, _ in failed for f in batches[i]]
     still = [i for i in result_prev if i["status"] in ("partial", "not_fixed", "unclear")]
     overview = " ".join(overviews[:3]) if overviews else "这次没有文件需要重新审查：上次有问题的文件都没有改动。"
+    # 还没审完的文件：只记这次仍然失败或读不到的。上次没审完的文件这次已经被选进来审过了，
+    # 不能再原样写回去（否则每次复查都会重复发送，界面也一直显示“没审完”）
+    still_pending = failed_files + unreadable
     _save(scan["folder"], still + new_issues, overview, {**prints, **now_prints} if not failed else prints,
-          failed_files + last.get("pending", []))
+          still_pending)
 
     counts = {k: sum(1 for i in result_prev if i["status"] == k) for k in ("fixed", "partial", "not_fixed", "unclear")}
     return {"mode": "recheck", "last_time": last["time"], "overview": overview, "previous": result_prev,
@@ -478,7 +485,7 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
             "folder": scan["folder"], "reviewed": [f["rel"] for f in files], "batches": total,
             "unchanged": scan["total"] - len(files),
             "failed_batches": [{"index": i + 1, "error": e} for i, e in sorted(failed)],
-            "pending": sorted(set(failed_files)), "pending_groups": folder.group_by_dir(failed_files),
+            "pending": sorted(set(still_pending)), "pending_groups": folder.group_by_dir(still_pending),
             "skipped": [], "skipped_groups": [], "ai_backend": used}
 
 

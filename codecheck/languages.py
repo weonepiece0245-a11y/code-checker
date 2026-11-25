@@ -1,4 +1,5 @@
 """支持的编程语言（被检查的代码是用什么语言写的）。"""
+import os
 import re
 from dataclasses import dataclass
 
@@ -18,7 +19,18 @@ LANGUAGES = {
                            ("node", "--max-old-space-size=256", "{file}"), "node:22-slim"),
 }
 
-_SUFFIX = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript"}
+# 文件后缀 → 语言（全项目只有这一份；folder.EXT 也用它）
+SUFFIX = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript"}
+_SUFFIX = SUFFIX
+
+
+def code_suffix(filename: str | None, lang: Language) -> str:
+    """临时文件用什么后缀：尽量和原文件一样（.mjs / .cjs 会影响 Node 把它当成哪种模块）。"""
+    if filename:
+        ext = os.path.splitext(filename)[1].lower()
+        if SUFFIX.get(ext) == lang.key:
+            return ext
+    return lang.suffix
 
 
 _JS = [r"^\s*(const|let|var)\s+[\w${}\[\], ]+\s*=", r"\bfunction\b\s*[\w$]*\s*\(", r"=>", r"console\.\w+\(",

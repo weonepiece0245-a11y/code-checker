@@ -6,6 +6,7 @@
 退出码：0 = 没有更新或已跳过；10 = 更新完成，需要重新启动启动器。
 """
 import io
+import re
 import shutil
 import sys
 import tempfile
@@ -19,10 +20,16 @@ KEEP = {".deps_ok", "update_source.txt"}  # 本地文件，不被覆盖
 
 
 def _ver(s: str) -> tuple:
-    try:
-        return tuple(int(x) for x in s.strip().split("."))
-    except ValueError:
-        return (0,)
+    """把版本号变成可以比较大小的元组。
+    "0.10.0" → ((0, 10, 0), 1)；带后缀的预发布版 "1.2.0-beta" → ((1, 2, 0), 0)，比正式版 1.2.0 小一点。
+    完全认不出的版本号 → ((), 0)，比任何正常版本都小。"""
+    m = re.match(r"\s*v?(\d+(?:\.\d+)*)(.*)", s or "")
+    if not m:
+        return ((), 0)
+    nums = tuple(int(x) for x in m.group(1).split("."))
+    while len(nums) > 1 and nums[-1] == 0:  # 1.2 和 1.2.0 一样
+        nums = nums[:-1]
+    return (nums, 0 if m.group(2).strip() else 1)
 
 
 def _get(url: str, timeout: int) -> bytes:
@@ -92,6 +99,8 @@ def apply(source: str, remote: str) -> None:
     if zf.testzip() is not None:
         raise ValueError("更新包已损坏")
     names = zf.namelist()
+    if not names:
+        raise ValueError("下载到的更新包是空的，可能正在发布中，请稍后再试")
     prefix = names[0].split("/")[0] + "/"
     files = {}
     for name in names:

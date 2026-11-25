@@ -9,11 +9,12 @@ from collections import Counter
 from pathlib import Path
 
 from . import __version__, static_check, store
+from .languages import SUFFIX
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 from .proc import NO_WINDOW
 
-EXT = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript"}
+EXT = SUFFIX  # 文件后缀 → 语言（定义在 languages.py）
 IGNORE_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "env", ".env",
                ".idea", ".vscode", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache",
                "site-packages", ".tox", ".next", ".nuxt", "coverage", ".cache", "bower_components",
@@ -219,12 +220,20 @@ def _keys(files: list[dict]) -> list[tuple]:
 def compare_with_last(r: dict) -> dict | None:
     """和上一次检查这个文件夹的结果比较，并把这次的结果存起来。"""
     now_items = _keys(r["files"])
+    now_files = sorted(f["rel"].replace("\\", "/") for f in r["files"])
     last = store.get("scan", r["folder"])
-    store.put("scan", r["folder"], {"time": store.now(), "items": now_items})
+    store.put("scan", r["folder"], {"time": store.now(), "items": now_items, "files": now_files})
     if not last:
         return None
-    old = Counter(tuple(x[:3]) for x in last["items"])
-    new = Counter(tuple(x[:3]) for x in now_items)
+    # 只比较两次都检查过的文件：
+    #   这次没检查的文件（新排除的、删掉的）里的问题，不能算“已解决”；
+    #   上次没检查、这次才加入的文件里的问题，不能算“新出现”
+    now_set = set(now_files)
+    last_files = set(last["files"]) if last.get("files") is not None else None  # 旧记录没有文件列表
+    left_out = {x[0] for x in last["items"]} - now_set
+    newly_in = (now_set - last_files) if last_files is not None else set()
+    old = Counter(tuple(x[:3]) for x in last["items"] if x[0] in now_set)
+    new = Counter(tuple(x[:3]) for x in now_items if last_files is None or x[0] in last_files)
     gone, added = old - new, new - old
     line_old = {tuple(x[:3]): x for x in last["items"]}
     line_new = {tuple(x[:3]): x for x in now_items}
@@ -237,6 +246,7 @@ def compare_with_last(r: dict) -> dict | None:
         return sorted(out, key=lambda i: (i["severity"] != "error", i["rel"]))[:100]
 
     return {"last_time": last["time"], "last_total": len(last["items"]), "now_total": len(now_items),
+            "left_out_files": len(left_out), "newly_in_files": len(newly_in),
             "resolved": lst(gone, line_old), "new": lst(added, line_new),
             "resolved_count": sum(gone.values()), "new_count": sum(added.values()),
             "remaining_count": len(now_items) - sum(added.values())}

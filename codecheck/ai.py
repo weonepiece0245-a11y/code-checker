@@ -10,8 +10,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+from contextlib import contextmanager
 
-from .proc import NO_WINDOW
+from . import textio
+from .proc import NEW_GROUP, NO_WINDOW, kill_tree
 
 MODEL = os.environ.get("CODECHECK_MODEL", "claude-opus-5-5")
 
@@ -49,7 +52,7 @@ def fence(text: str, lang: str = "") -> str:
 
 
 def _build_user_message(language_name: str, code: str, issues: list, run: dict | None, stdin: str) -> str:
-    numbered = "\n".join(f"{i + 1:>4} | {ln}" for i, ln in enumerate(code.splitlines()))
+    numbered = textio.number_lines(code)
     parts = [f"编程语言：{language_name}", f"代码（带行号）：\n{fence(numbered)}"]
     if issues:
         parts.append("静态检查发现：\n" + "\n".join(
@@ -83,22 +86,52 @@ def find_claude() -> str | None:
     return next((c for c in candidates if c and os.path.isfile(c)), None)
 
 
+NEED_AI = "这个功能需要把代码发给 AI，但你选了“不用 AI”。如果可以发送，请把 AI 改成“自动”再试。"
+
+
+def has_api_key() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
+def require_ai(choice: str) -> str:
+    """AI 功能（生成测试、审查）的入口检查：用户明确选了“不用 AI”时不能偷偷改用 AI。"""
+    if choice == "none":
+        raise RuntimeError(NEED_AI)
+    return choice
+
+
 def pick_backend(choice: str = "auto") -> str:
     if choice != "auto":
         return choice
     # 优先用 Claude Code 订阅额度，没有 claude 命令才用 API key
     if find_claude():
         return "cli"
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+    if has_api_key():
         return "api"
     return "none"
+
+
+@contextmanager
+def _api_errors():
+    """把 Anthropic API 的各种错误统一转成中文提示（_via_api 和 _structured_api 共用）。"""
+    import anthropic
+    try:
+        yield
+    except anthropic.AuthenticationError:
+        raise RuntimeError("API key 无效，请检查 ANTHROPIC_API_KEY") from None
+    except anthropic.RateLimitError:
+        raise RuntimeError("请求太频繁或额度用完，请稍后再试") from None
+    except anthropic.APIStatusError as e:
+        raise RuntimeError(f"API 出错（{e.status_code}）：{e.message}") from None
+    except anthropic.APIConnectionError:
+        raise RuntimeError("连不上 Anthropic API，请检查网络") from None
 
 
 def _via_api(system: str, user: str) -> str:
     import anthropic
 
     client = anthropic.Anthropic()
-    try:
+    with _api_errors():
         resp = client.beta.messages.create(
             model=MODEL,
             max_tokens=16000,
@@ -109,14 +142,6 @@ def _via_api(system: str, user: str) -> str:
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
         )
-    except anthropic.AuthenticationError:
-        raise RuntimeError("API key 无效，请检查 ANTHROPIC_API_KEY") from None
-    except anthropic.RateLimitError:
-        raise RuntimeError("请求太频繁或额度用完，请稍后再试") from None
-    except anthropic.APIStatusError as e:
-        raise RuntimeError(f"API 出错（{e.status_code}）：{e.message}") from None
-    except anthropic.APIConnectionError:
-        raise RuntimeError("连不上 Anthropic API，请检查网络") from None
     if resp.stop_reason == "refusal":
         return "（AI 拒绝分析这段代码。）"
     text = "".join(b.text for b in resp.content if b.type == "text")
@@ -128,7 +153,7 @@ def _via_api(system: str, user: str) -> str:
 TRUNCATED_HINT = "AI 的回答太长，被截断了。可以排除一些文件夹、选一个子文件夹，或者分几次审查。"
 
 
-def _run_claude(system: str, user: str, timeout: int, output_args: list[str]) -> str:
+def _run_claude(system: str, user: str, timeout: int, output_args: list[str], cancel=None) -> str:
     """调用本机已登录的 Claude Code（claude -p），返回它的标准输出。用的是订阅额度。"""
     exe = find_claude()  # Windows 上可能是 claude.cmd，需要完整路径
     if not exe:
@@ -143,10 +168,25 @@ def _run_claude(system: str, user: str, timeout: int, output_args: list[str]) ->
     # 去掉 API key 环境变量，确保 Claude Code 走订阅额度而不是按 API 计费
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     try:
-        p = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=timeout, creationflags=NO_WINDOW,
-                           encoding="utf-8", errors="replace", env=env)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Claude Code 响应超时") from None
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                creationflags=NO_WINDOW, encoding="utf-8", errors="replace", env=env, **NEW_GROUP)
+        deadline, first = time.monotonic() + timeout, True
+        while True:  # 每秒看一次：用户点了“取消”就立刻结束，不再继续消耗额度
+            try:
+                out, err = proc.communicate(user if first else None, timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                first = False
+                if (cancel is not None and cancel.is_set()) or time.monotonic() > deadline:
+                    kill_tree(proc)  # 连同 claude 启动的子进程一起结束
+                    try:
+                        proc.communicate(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError("已取消") from None
+                    raise RuntimeError("Claude Code 响应超时") from None
+        p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     finally:
         try:
             os.unlink(sys_file)
@@ -162,19 +202,33 @@ def _via_cli(system: str, user: str) -> str:
     return _run_claude(system, user, 300, ["--output-format", "text"]).strip()
 
 
+def _with_fallback(choice: str, call_cli, call_api) -> tuple[str, object]:
+    """按选择调用 AI。自动模式下 Claude Code 调用失败（没登录、订阅过期……）且设置了 API key 时，改用 API key 再试。"""
+    backend = pick_backend(choice)
+    if backend == "api":
+        return "api", call_api()
+    if backend == "cli":
+        try:
+            return "cli", call_cli()
+        except InterruptedError:
+            raise
+        except RuntimeError as e:
+            if choice == "auto" and has_api_key() and "超时" not in str(e):
+                return "api", call_api()
+            raise
+    if backend == "none":
+        raise RuntimeError("这个功能需要 AI：请登录 Claude Code 或设置 API key")
+    raise ValueError(f"未知的 AI 后端：{backend}")
+
+
 def analyze(language_name: str, code: str, issues: list, run: dict | None, stdin: str = "",
             backend: str = "auto", explain_lang: str = "简体中文") -> tuple[str, str]:
     """返回 (使用的后端, 分析文本)。"""
-    backend = pick_backend(backend)
-    if backend == "none":
+    if backend == "none" or pick_backend(backend) == "none":
         return "none", ""
     system = SYSTEM_PROMPT.format(lang=explain_lang)
     user = _build_user_message(language_name, code, issues, run, stdin)
-    if backend == "api":
-        return "api", _via_api(system, user)
-    if backend == "cli":
-        return "cli", _via_cli(system, user)
-    raise ValueError(f"未知的 AI 后端：{backend}")
+    return _with_fallback(backend, lambda: _via_cli(system, user), lambda: _via_api(system, user))
 
 
 # ---------- 结构化输出（生成测试等功能用）----------
@@ -191,11 +245,11 @@ def _parse_object(text: str) -> dict:
     return data
 
 
-def _structured_api(system: str, user: str, schema: dict, timeout: int = 600) -> dict:
+def _structured_api(system: str, user: str, schema: dict, timeout: int = 600, cancel=None) -> dict:
     import anthropic
 
     client = anthropic.Anthropic(timeout=timeout)
-    try:
+    with _api_errors():
         # 输出可能很长（审查整个文件夹），用流式请求避免超时，并放宽长度上限
         with client.beta.messages.stream(
             model=MODEL,
@@ -206,15 +260,10 @@ def _structured_api(system: str, user: str, schema: dict, timeout: int = 600) ->
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
         ) as stream:
+            for _ in stream:  # 边收边检查：用户点了“取消”就立刻断开，不再继续消耗额度
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError("已取消")
             resp = stream.get_final_message()
-    except anthropic.AuthenticationError:
-        raise RuntimeError("API key 无效，请检查 ANTHROPIC_API_KEY") from None
-    except anthropic.RateLimitError:
-        raise RuntimeError("请求太频繁或额度用完，请稍后再试") from None
-    except anthropic.APIStatusError as e:
-        raise RuntimeError(f"API 出错（{e.status_code}）：{e.message}") from None
-    except anthropic.APIConnectionError:
-        raise RuntimeError("连不上 Anthropic API，请检查网络") from None
     if resp.stop_reason == "refusal":
         raise RuntimeError("AI 拒绝处理这段代码")
     if resp.stop_reason == "max_tokens":
@@ -222,9 +271,9 @@ def _structured_api(system: str, user: str, schema: dict, timeout: int = 600) ->
     return _parse_object(next((b.text for b in resp.content if b.type == "text"), ""))
 
 
-def _structured_cli(system: str, user: str, schema: dict, timeout: int = 400) -> dict:
+def _structured_cli(system: str, user: str, schema: dict, timeout: int = 400, cancel=None) -> dict:
     stdout = _run_claude(system, user, timeout,
-                         ["--output-format", "json", "--json-schema", json.dumps(schema, ensure_ascii=False)])
+                         ["--output-format", "json", "--json-schema", json.dumps(schema, ensure_ascii=False)], cancel)
     try:
         out = json.loads(stdout)
     except json.JSONDecodeError:
@@ -244,11 +293,9 @@ def _structured_cli(system: str, user: str, schema: dict, timeout: int = 400) ->
 
 
 def structured(system: str, user: str, schema: dict, backend: str = "auto",
-               timeout: int = 400) -> tuple[str, dict]:
-    """让 AI 按 JSON Schema 返回结果。返回 (使用的后端, 数据)。"""
-    backend = pick_backend(backend)
-    if backend == "api":
-        return "api", _structured_api(system, user, schema, timeout)
-    if backend == "cli":
-        return "cli", _structured_cli(system, user, schema, timeout)
-    raise RuntimeError("这个功能需要 AI：请登录 Claude Code 或设置 API key")
+               timeout: int = 400, cancel=None) -> tuple[str, dict]:
+    """让 AI 按 JSON Schema 返回结果。返回 (使用的后端, 数据)。cancel 被设置时会中途停止。"""
+    require_ai(backend)
+    return _with_fallback(backend,
+                          lambda: _structured_cli(system, user, schema, timeout, cancel),
+                          lambda: _structured_api(system, user, schema, timeout, cancel))

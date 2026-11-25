@@ -59,7 +59,8 @@ def indent_tail(text, max_lines=30):
 
 
 def _ai(a) -> str:
-    return "auto" if a.ai == "none" else a.ai
+    # 用户选了 --ai none 就是不想把代码发出去：AI 功能会给出提示，而不是偷偷改用 AI
+    return a.ai
 
 
 def _gen_tests(a, code: str) -> dict:
@@ -68,8 +69,10 @@ def _gen_tests(a, code: str) -> dict:
     try:
         # 用和检查时一样的语言（看文件后缀），不要让生成测试时再从代码特征去猜
         lang_key = a.lang or detect(None if a.file == "-" else a.file, code).key
-        g = testgen.generate(code, lang_key, a.explain_lang, _ai(a))
-        t = testgen.run(code, g["tests"], g["language"], a.timeout, a.sandbox)
+        g = testgen.generate(code, lang_key, a.explain_lang, _ai(a),
+                             source_path=None if a.file == "-" else os.path.abspath(a.file))
+        t = testgen.run(code, g["tests"], g["language"], a.timeout, a.sandbox,
+                        source_path=None if a.file == "-" else os.path.abspath(a.file))
         return {"summary": g["summary"], **t}
     except Exception as e:
         return {"error": str(e)}

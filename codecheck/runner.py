@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, asdict
 
 from .languages import Language
-from .proc import NO_WINDOW, console_python
+from .proc import NO_WINDOW, console_python, kill_tree
 
 
 @dataclass
@@ -204,17 +204,25 @@ class _WinJob:
             self.handle = None
 
 
-def _kill_tree(proc, job: "_WinJob | None"):
-    if sys.platform == "win32":
-        if job and job.kill():
-            return
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
-                       creationflags=NO_WINDOW)
-        return
+CREATE_SUSPENDED = 0x00000004
+
+
+def _resume(proc) -> bool:
+    """让以“暂停”状态启动的 Windows 进程开始运行（NtResumeProcess 恢复进程里的所有线程）。"""
     try:
-        os.killpg(proc.pid, 9)  # start_new_session=True，进程组号就是 pid
-    except (ProcessLookupError, PermissionError, OSError):
-        proc.kill()
+        import ctypes
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        return ntdll.NtResumeProcess(ctypes.c_void_p(int(proc._handle))) == 0  # 0 = STATUS_SUCCESS
+    except Exception:
+        return False
+
+
+def _kill_tree(proc, job: "_WinJob | None"):
+    if job and job.kill():  # Windows：作业对象一次结束整组
+        return
+    kill_tree(proc)
 
 
 # Windows 上缺少这些变量时 Python/Node 无法启动
@@ -258,19 +266,35 @@ def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: in
         prefix = _prlimit_prefix(lang.key, timeout, memory_mb)
         if not prefix:
             preexec = _posix_limits(lang.key, timeout, memory_mb)
-    start = time.monotonic()
-    try:
-        proc = subprocess.Popen(prefix + cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                creationflags=NO_WINDOW, start_new_session=sys.platform != "win32",
+    def launch(suspended: bool):
+        flags = NO_WINDOW | (CREATE_SUSPENDED if suspended else 0)
+        return subprocess.Popen(prefix + cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                creationflags=flags, start_new_session=sys.platform != "win32",
                                 cwd=cwd, env=env, text=True, encoding="utf-8",
                                 errors="replace", preexec_fn=preexec)
+
+    start = time.monotonic()
+    limit_note = ""
+    try:
+        # Windows：先以“暂停”状态启动，加进作业对象后再让它开始运行，
+        # 这样它来不及在资源限制生效前启动子进程
+        suspended = bool(job and job.handle)
+        proc = launch(suspended)
+        if job:
+            assigned = job.assign(proc)
+            if suspended and not _resume(proc):
+                # 恢复运行失败（极少见）：结束它，改用普通方式启动，再尽量加进作业对象
+                _kill_tree(proc, job)
+                proc.wait()
+                proc = launch(False)
+                assigned = job.assign(proc)
+            if not assigned:
+                limit_note = "（注意：这次没能启用 Windows 的内存和进程数限制，只有时间限制）"
     except FileNotFoundError:
         if job:
             job.close()
         need = "Node.js（https://nodejs.org 下载 LTS 版本）" if lang.key == "javascript" else lang.name
         raise RuntimeError(f"找不到 {os.path.basename(cmd[0])}，没法运行 {lang.name} 代码。请先安装 {need}") from None
-    if job:
-        job.assign(proc)
     timed_out = False
     try:
         out, err = proc.communicate(stdin, timeout=timeout)
@@ -293,6 +317,8 @@ def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: in
                 -25: "写入文件过大"}.get(code, f"进程被信号 {-code} 终止")
     if in_place:
         err = _clean_boot_frames(err)
+    if limit_note:
+        note = (note + " " + limit_note).strip()
     return RunResult(None if timed_out else code, _clip(out), _clip(err), dur, timed_out, "local", note)
 
 

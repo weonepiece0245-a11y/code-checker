@@ -3,7 +3,7 @@ import os
 import tempfile
 
 from . import ai, runner, static_check
-from .languages import LANGUAGES, detect
+from .languages import LANGUAGES, code_suffix, detect
 
 
 def check_code(code: str, filename: str | None = None, language: str | None = None, stdin: str = "",
@@ -19,7 +19,7 @@ def check_code(code: str, filename: str | None = None, language: str | None = No
     with tempfile.TemporaryDirectory(prefix="codecheck_") as tmp:
         if sandbox == "docker":
             os.chmod(tmp, 0o755)  # 只有 Docker 里的程序需要读；本机运行时保持只有自己能读
-        path = os.path.join(tmp, "main" + lang.suffix)
+        path = os.path.join(tmp, "main" + code_suffix(filename, lang))
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
         issues = [i.to_dict() for i in static_check.check(lang.key, path)]

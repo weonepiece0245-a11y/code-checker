@@ -103,7 +103,31 @@ def health():
 
 @app.get("/api/info")
 def info():
-    return {"ai_auto": pick_backend("auto"), "version": __version__, "root": str(Path(__file__).resolve().parents[2])}
+    return {"ai_auto": pick_backend("auto"), "version": __version__, "root": str(Path(__file__).resolve().parents[2]),
+            "docker": DOCKER_OK.get("ok", False)}
+
+
+# 启动时在后台看一下 Docker 能不能用（docker info 可能要几秒），能用就默认用 Docker 隔离运行
+DOCKER_OK: dict = {}
+
+
+def _check_docker():
+    import shutil
+    import subprocess
+
+    from ..proc import NO_WINDOW
+    if not shutil.which("docker"):
+        DOCKER_OK["ok"] = False
+        return
+    try:
+        r = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"], capture_output=True, text=True,
+                           timeout=8, creationflags=NO_WINDOW)
+        DOCKER_OK["ok"] = r.returncode == 0 and bool(r.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        DOCKER_OK["ok"] = False
+
+
+threading.Thread(target=_check_docker, daemon=True).start()
 
 
 @app.get("/api/update/check")
@@ -152,7 +176,8 @@ def tests_generate(req: GenTestsRequest):
     try:
         from ..languages import detect
         language = req.language or detect(_real_file(req.source_path), req.code).key
-        return testgen.generate(req.code, language, req.explain_lang, req.ai)
+        return testgen.generate(req.code, language, req.explain_lang, req.ai,
+                                source_path=_real_file(req.source_path))
     except Exception as e:
         return {"error": str(e)}
 
@@ -163,13 +188,15 @@ class RunTestsRequest(BaseModel):
     tests: list[dict] = Field(max_length=30)
     timeout: int = Field(5, ge=1, le=60)
     sandbox: Sandbox = "local"
+    source_path: str | None = None  # 打开的真实文件：测试也在原位置运行
 
 
 @app.post("/api/tests/run")
 def tests_run(req: RunTestsRequest):
     try:
         with _slot():
-            return testgen.run(req.code, req.tests, req.language or None, req.timeout, req.sandbox)
+            return testgen.run(req.code, req.tests, req.language or None, req.timeout, req.sandbox,
+                               source_path=_real_file(req.source_path))
     except Exception as e:
         return {"error": str(e)}
 
@@ -272,7 +299,7 @@ class AIReviewRequest(BaseModel):
 
 
 def _run_review(req: "AIReviewRequest", progress=None, cancel=None) -> dict:
-    ai_backend = "auto" if req.ai == "none" else req.ai
+    ai_backend = req.ai  # 选了“不用 AI”时，审查会给出提示，而不是偷偷改用 AI
     if req.mode == "recheck":
         return folder_ai.recheck(req.path, req.explain_lang, ai_backend, _exclude(req), progress, cancel)
     return folder_ai.review(req.path, req.explain_lang, ai_backend, _exclude(req), progress, cancel, mode=req.mode)
@@ -296,10 +323,15 @@ def fs_ai_recheck(req: AIReviewRequest):
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
+MAX_JOBS = 2  # 同时最多进行几个 AI 审查（每个内部最多再并行 3 批）
 
 
 @app.post("/api/fs/ai_job")
 def fs_ai_job(req: AIReviewRequest):
+    with JOBS_LOCK:
+        running = sum(1 for j in JOBS.values() if j["status"] == "running")
+    if running >= MAX_JOBS:
+        return {"error": f"已经有 {running} 个 AI 审查正在进行，请等它们完成或取消后再开始新的。"}
     job_id = secrets.token_hex(8)
     job = {"status": "running", "done": 0, "total": 0, "result": None, "error": None,
            "cancel": threading.Event(), "started": time.time()}

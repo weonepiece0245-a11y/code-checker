@@ -18,6 +18,25 @@ def windowless_python() -> str:
     return str(p) if p.exists() else sys.executable
 
 
+NEW_GROUP = {"start_new_session": True} if sys.platform != "win32" else {}  # 让子进程自成一组，方便整组结束
+
+
+def kill_tree(proc) -> None:
+    """结束进程以及它启动的所有子进程（只杀主进程的话，子进程会继续运行、占着输出管道）。"""
+    import os
+    import subprocess
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, creationflags=NO_WINDOW)
+        return
+    try:
+        os.killpg(proc.pid, 9)  # 需要用 NEW_GROUP（start_new_session）启动，进程组号就是 pid
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def console_python() -> str:
     """返回 python.exe（而不是 pythonw.exe），用来运行代码和工具，输入输出行为和命令行里一致。"""
     p = Path(sys.executable)
