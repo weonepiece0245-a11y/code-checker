@@ -44,6 +44,11 @@ header h1{font-size:17px;margin:0}
 #frames iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg)}
 #frames iframe[hidden]{display:none}
 a{color:var(--accent)}
+#helpbg{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
+#helpbg[hidden]{display:none}
+#helpbox{background:var(--panel);color:var(--text);border-radius:12px;max-width:680px;width:100%;max-height:85vh;overflow:auto;padding:18px 22px;position:relative;box-shadow:0 10px 40px rgba(0,0,0,.25)}
+#helpbox h2{margin:0 0 6px;font-size:19px} #helpbox h3{margin:14px 0 4px;font-size:15.5px} #helpbox p{margin:4px 0;font-size:14.5px;line-height:1.65}
+#helpclose{position:absolute;top:10px;right:12px;border:0;background:transparent;font-size:22px;color:var(--muted);cursor:pointer}
 </style>
 </head>
 <body>
@@ -51,11 +56,31 @@ a{color:var(--accent)}
   <h1>代码检查助手</h1>
   <span class="muted" style="font-size:13px">静态检查 → 安全运行 → AI 讲解错误和修改建议</span>
   <span class="muted" style="margin-left:auto;font-size:12px"><span id="ver"></span> ·
-    <a href="#" id="whereami" title="">程序位置</a> · <a href="#" id="checkupd">检查更新</a></span>
+    <a href="#" id="help">❓ 使用说明</a> · <a href="#" id="whereami" title="">程序位置</a> · <a href="#" id="checkupd">检查更新</a></span>
 </header>
 <div id="updbar"><span id="updmsg"></span><button id="updbtn">一键更新</button></div>
 <nav id="tabbar"><button id="newtab" title="新建标签页（Ctrl+T）">＋</button></nav>
 <div id="frames"></div>
+<div id="helpbg" hidden>
+  <div id="helpbox" role="dialog" aria-label="使用说明">
+    <button id="helpclose" title="关闭">×</button>
+    <h2>❓ 使用说明</h2>
+    <h3>三个主要功能</h3>
+    <p><b>▶ 检查这段代码</b>：把代码粘贴到左边（或“打开文件”），点它。程序会找出写错的地方、真的运行一遍，再让 AI 用中文讲解为什么错、怎么改。修好的代码可以一键“放回编辑器”。</p>
+    <p><b>🧪 AI 生成测试</b>：AI 读懂代码想做什么，设计几种情况（普通的、空的、负数……）去试，告诉你哪些会出错。改完代码可以重跑同一批测试，确认真的修好了。</p>
+    <p><b>📁 检查整个项目文件夹</b>：一次列出所有文件里的问题，点问题就能打开那个文件、跳到那一行。</p>
+    <h3>AI 审查 和 AI 复查</h3>
+    <p><b>🤖 AI 审查</b>：让 AI 像资深程序员一样通读整个项目，找出 bug、安全隐患和可以改进的地方，分成 🔴 严重 / 🟠 中等 / 🟡 轻微。
+      它<b>每次都是重新找</b>，永远会提出一些建议，没有代码能做到 0 个问题。</p>
+    <p><b>✅ AI 复查</b>：改完之后用它。它会对照上次的报告逐条告诉你：已解决、部分解决、还没解决，以及有没有改出新问题。只看改动过的文件，比较省额度。</p>
+    <p>推荐的顺序：<b>AI 审查</b> → 先改 🔴 严重和 🟠 中等 → <b>AI 复查</b> → 再改 → 再复查。</p>
+    <h3>标签页</h3>
+    <p>上方可以开多个标签页（＋ 或 Ctrl+T），每个标签页互不影响。一个在做 AI 审查时，可以去另一个检查别的代码。标签在转圈 = 正在忙；有圆点 = 有没保存的修改。</p>
+    <h3>安全</h3>
+    <p>“本机”运行方式下，代码真的在你电脑上执行，能读写你的文件、能联网。只运行你信任的代码；别人发来的代码请在“设置”里改成“Docker 隔离”（需要安装 Docker）。</p>
+    <p>选了“不用 AI”时，代码不会发给 AI。</p>
+  </div>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -147,6 +172,10 @@ function keyOf(e) {
   return null;
 }
 $("newtab").onclick = newTab;
+$("help").onclick = e => { e.preventDefault(); $("helpbg").hidden = false; };
+$("helpclose").onclick = () => { $("helpbg").hidden = true; };
+$("helpbg").onclick = e => { if (e.target === $("helpbg")) $("helpbg").hidden = true; };
+document.addEventListener("keydown", e => { if (e.key === "Escape") $("helpbg").hidden = true; });
 $("tabbar").ondblclick = e => { if (e.target === $("tabbar")) newTab(); };
 
 // 关闭整个窗口前：有没保存的修改就提醒

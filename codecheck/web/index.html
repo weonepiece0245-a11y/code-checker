@@ -149,6 +149,38 @@ body.embedded header, body.embedded #updbar{display:none !important}
 .rv details summary{cursor:pointer}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
+/* ---------- 页面优化：步骤、主按钮、设置收起 ---------- */
+.step{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;margin:2px 0 8px}
+.step .num{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff;font-size:13px}
+.step:not(:first-child){margin-top:14px}
+#code{min-height:300px}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:520px){.actions{grid-template-columns:1fr}}
+button.big{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 14px;text-align:left;font-size:15.5px;font-weight:600}
+button.big small{font-size:12.5px;font-weight:400;opacity:.85}
+.statusline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 4px;font-size:13px}
+.statusline .chip{border:1px solid var(--line);border-radius:99px;padding:1px 10px;background:var(--code);color:var(--muted)}
+.statusline .chip.warn{color:var(--warn);border-color:var(--warn);background:transparent}
+.statusline a{color:var(--accent);font-size:13px}
+#settings{border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:6px 0}
+#settings>summary{cursor:pointer;color:var(--muted);font-size:13.5px}
+#settings[open]>summary{margin-bottom:6px}
+.or{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px;margin:14px 0 10px}
+.or::before,.or::after{content:"";flex:1;border-top:1px solid var(--line)}
+.guide{display:grid;gap:10px;margin:8px 0}
+.guide .g{border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:var(--code)}
+.guide .g b{font-size:15px}
+.guide .g p{margin:6px 0 0;font-size:14px}
+.explain{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:6px 0 12px;background:var(--code);font-size:13.5px}
+.explain summary{cursor:pointer;font-weight:600}
+.explain table{border-collapse:collapse;margin:6px 0;width:100%}
+.explain td{padding:3px 6px;border-top:1px solid var(--line);vertical-align:top}
+.nextstep{border-left:4px solid var(--accent);background:var(--code);padding:8px 12px;border-radius:6px;margin:8px 0 12px;font-size:14px}
+.sevhead{display:flex;align-items:baseline;gap:8px;margin:14px 0 4px;font-size:15px;font-weight:600}
+.sevhead span{font-weight:400;font-size:13px;color:var(--muted)}
+.lightgroup>summary{cursor:pointer;font-size:15px;font-weight:600;margin:14px 0 4px}
+.lightgroup>summary span{font-weight:400;font-size:13px;color:var(--muted)}
+.btnhint{font-size:12.5px;color:var(--muted);margin:-2px 0 8px}
 </style>
 </head>
 <body>
@@ -160,36 +192,49 @@ body.embedded header, body.embedded #updbar{display:none !important}
 </header>
 <div id="updbar"><span id="updmsg"></span><button id="updbtn">一键更新</button></div>
 <main>
-  <section class="panel">
+  <section class="panel" id="leftpanel">
+    <div class="step"><span class="num">1</span>放入代码 <span class="muted" style="font-weight:400">— 粘贴、打开文件，或选一个示例</span></div>
     <div class="filebar">
       <button class="second" id="openfile">📄 打开文件</button>
-      <button class="second" id="openfolder">📁 检查文件夹</button>
       <button class="second" id="savefile" disabled>💾 保存（Ctrl+S）</button>
       <span id="filename">没有打开文件（也可以直接粘贴代码）</span>
       <span id="toast"></span>
     </div>
-    <div class="row">
+    <div class="row" style="margin-top:0">
       <label>编程语言 <select id="lang"><option value="">自动识别</option><option value="python">Python</option><option value="javascript">JavaScript</option></select></label>
-      <label>示例 <select id="sample"><option value="">选择一个有 bug 的例子…</option></select></label>
+      <label>示例 <select id="sample"><option value="">选一个有 bug 的例子试试…</option></select></label>
     </div>
     <textarea id="code" spellcheck="false" placeholder="在这里粘贴或输入代码"></textarea>
-    <label>运行时输入（可选，程序里 input() / 读取 stdin 时用）</label>
-    <textarea id="stdin" spellcheck="false"></textarea>
-    <div class="row">
-      <label><input type="checkbox" id="run" checked> 运行代码</label>
-      <label>超时 <input type="number" id="timeout" value="5" min="1" max="60" style="width:60px"> 秒</label>
-      <label>运行方式 <select id="sandbox"><option value="local">本机（不隔离）</option><option value="docker">Docker 隔离（更安全）</option></select></label>
+
+    <div class="step"><span class="num">2</span>选择要做什么</div>
+    <div class="actions">
+      <button id="go" class="big">▶ 检查这段代码<small>找错误 → 运行 → AI 讲解怎么改（Ctrl+Enter）</small></button>
+      <button id="gentests" class="big second">🧪 AI 生成测试<small>AI 设计各种情况的测试，逐个运行</small></button>
     </div>
-    <div id="runwarn" class="muted" style="font-size:12.5px;margin:-4px 0 8px;color:var(--warn)">
-      ⚠️ 本机运行 = 代码真的在你电脑上执行，能读写你的文件、能联网（只限制了时间和内存）。
-      只运行你信任的代码；别人发来的代码请选“Docker 隔离”。</div>
-    <div class="row">
-      <label>AI <select id="ai"><option value="auto">自动</option><option value="cli">Claude Code 订阅</option><option value="api">API key</option><option value="none">不用 AI</option></select></label>
-      <label>讲解语言 <select id="explain"><option>简体中文</option><option>繁體中文</option><option>English</option></select></label>
-      <button id="go">检查（Ctrl+Enter）</button>
-      <button id="gentests" class="second">AI 生成测试</button>
+    <div class="statusline">
+      <span class="chip" id="aichip"></span>
+      <span class="chip" id="runchip"></span>
+      <a href="#" id="opensettings">修改设置</a>
     </div>
-    <div class="muted" id="aiinfo" style="font-size:12px"></div>
+    <details id="settings">
+      <summary>⚙️ 设置（AI、运行方式、超时、运行时输入）</summary>
+      <div class="row">
+        <label>AI <select id="ai"><option value="auto">自动</option><option value="cli">Claude Code 订阅</option><option value="api">API key</option><option value="none">不用 AI</option></select></label>
+        <label>讲解语言 <select id="explain"><option>简体中文</option><option>繁體中文</option><option>English</option></select></label>
+      </div>
+      <div class="muted" id="aiinfo" style="font-size:12px;margin:-4px 0 8px"></div>
+      <div class="row">
+        <label><input type="checkbox" id="run" checked> 运行代码</label>
+        <label>超时 <input type="number" id="timeout" value="5" min="1" max="60" style="width:60px"> 秒</label>
+        <label>运行方式 <select id="sandbox"><option value="local">本机（不隔离）</option><option value="docker">Docker 隔离（更安全）</option></select></label>
+      </div>
+      <div id="runwarn" class="muted" style="font-size:12.5px;margin:-4px 0 8px;color:var(--warn)"></div>
+      <label>运行时输入（程序里用了 input() 或读取输入时才需要填，每行一个）</label>
+      <textarea id="stdin" spellcheck="false"></textarea>
+    </details>
+
+    <div class="or"><span>或者</span></div>
+    <button id="openfolder" class="big second" style="width:100%">📁 检查整个项目文件夹<small>列出每个文件的问题；还能让 AI 通读全部代码找问题</small></button>
   </section>
   <div class="col">
     <nav class="vtabs" id="vtabs">
@@ -199,11 +244,25 @@ body.embedded header, body.embedded #updbar{display:none !important}
       <button data-view="folderout">文件夹<span class="vb" id="vb-folderout"></span></button>
       <button data-view="folderai">AI 审查<span class="vb" id="vb-folderai"></span></button>
     </nav>
-    <section class="panel view" id="out"><p class="muted">点左边的“检查”，结果会显示在这里。</p></section>
-    <section class="panel view" id="aiout" hidden><p class="muted">点“检查”时（AI 选“自动”），AI 会在这里讲解错误、给出修好的代码。</p></section>
+    <section class="panel view" id="out">
+      <h2 style="margin-top:0">👋 怎么用</h2>
+      <div class="guide">
+        <div class="g"><b>▶ 检查一段代码</b>
+          <p>把代码粘贴到左边（或“打开文件”），点“检查这段代码”。程序会：找出写错的地方 → 真的运行一遍 → 让 AI 用中文讲解为什么错、怎么改。</p>
+          <p class="muted">没有代码？先在左边“示例”里选一个有 bug 的例子试试。</p></div>
+        <div class="g"><b>🧪 AI 生成测试</b>
+          <p>AI 先读懂代码想做什么，再设计几种情况（普通的、空的、负数……）去试，告诉你哪些情况会出错。改完代码可以一键重跑，确认真的修好了。</p></div>
+        <div class="g"><b>📁 检查整个项目文件夹</b>
+          <p>一次查看项目里所有文件的问题。之后还可以：</p>
+          <p>🤖 <b>AI 审查</b>：让 AI 像资深程序员一样通读全部代码，找出 bug、安全隐患和可以改进的地方。<br>
+             ✅ <b>AI 复查</b>：改完之后用它确认上次的问题改好了没有（只看改动过的文件，省额度）。</p></div>
+      </div>
+      <p class="muted" style="font-size:13px">右边的标签（检查结果 / AI 讲解 / 测试 / 文件夹 / AI 审查）分别放不同的结果，标签上的小标记表示有新内容。</p>
+    </section>
+    <section class="panel view" id="aiout" hidden><p class="muted">点“检查这段代码”后（AI 选“自动”），AI 会在这里讲解错误、给出修好的代码。</p></section>
     <section class="panel view" id="testsout" hidden><p class="muted">点左边的“AI 生成测试”，AI 会设计测试并逐个运行，结果显示在这里。</p></section>
-    <section class="panel view" id="folderout" hidden><p class="muted">点左上角的“📁 检查文件夹”，选一个文件夹，这里会列出每个文件的问题。</p></section>
-    <section class="panel view" id="folderai" hidden><p class="muted">先检查一个文件夹，再点“🤖 AI 审查整个文件夹”，报告会显示在这里。</p></section>
+    <section class="panel view" id="folderout" hidden><p class="muted">点左边的“📁 检查整个项目文件夹”，选一个文件夹，这里会列出每个文件的问题。</p></section>
+    <section class="panel view" id="folderai" hidden><p class="muted">先检查一个项目文件夹，再点“🤖 AI 审查”，报告会显示在这里。</p></section>
   </div>
 </main>
 <script>
@@ -285,8 +344,21 @@ function updateRunWarn() {
     ? "⚠️ 本机运行 = 代码真的在你电脑上执行，能读写你的文件、能联网（只限制了时间和内存）。只运行你信任的代码；别人发来的代码请选“Docker 隔离”。"
     : "🛡️ Docker 隔离：代码在容器里运行，不能联网、看不到你的文件。（这种方式下，代码不能 import 同一文件夹里的其他文件。）";
   $("runwarn").style.color = $("sandbox").value === "local" ? "var(--warn)" : "var(--muted)";
+  // 左边的小标签：一眼看到现在的设置
+  const local = $("sandbox").value === "local";
+  const runOn = $("run").checked;
+  $("runchip").textContent = !runOn ? "只检查，不运行" : (local ? "⚠️ 本机运行（不隔离）" : "🛡️ Docker 隔离运行");
+  $("runchip").className = "chip" + (runOn && local ? " warn" : "");
+  $("runchip").title = runOn && local ? "代码会真的在你电脑上运行，能读写你的文件。别人发来的代码请改用 Docker 隔离。" : "";
+  const aiName = {auto: "自动", cli: "Claude Code 订阅", api: "API key", none: "不用 AI"}[$("ai").value];
+  $("aichip").textContent = "AI：" + aiName;
 }
+updateRunWarn();
 $("sandbox").onchange = updateRunWarn;
+$("run").onchange = updateRunWarn;
+$("ai").addEventListener("change", updateRunWarn);
+$("opensettings").onclick = e => { e.preventDefault(); $("settings").open = !$("settings").open;
+  if ($("settings").open) $("settings").scrollIntoView({behavior: "smooth", block: "nearest"}); };
 function confirmLocalRun(what) {
   if ($("sandbox").value !== "local") return true;
   let acked = false;
@@ -472,14 +544,20 @@ function renderFolder(r) {
   }
   const lr = r.last_review;
   let aiBtns = "";
-  if (r.total) aiBtns = lr
-    ? `<button class="ai" data-mode="recheck">🤖 AI 复查：上次的 ${lr.issues} 个问题解决了吗？</button>
-       ${lr.pending ? `<button class="ai" data-mode="continue">▶ 继续审查剩下的 ${lr.pending} 个文件</button>` : ""}
-       <button class="ghost" data-mode="review">重新完整审查</button>`
-    : `<button class="ai" data-mode="review">🤖 AI 审查整个文件夹（全部 ${r.total} 个文件）</button>`;
-  h += `<div class="row" style="margin:4px 0">${aiBtns}
-        <button class="ghost" id="rescan">重新检查文件夹</button><button class="ghost" id="closefolder">关闭</button></div>`;
-  if (lr) h += `<p class="muted" style="font-size:12.5px;margin:0 0 6px">上次 AI 审查：${esc(lr.time)}，还有 ${lr.issues} 个问题待确认${lr.pending ? `；${lr.pending} 个文件还没审完` : ""}</p>`;
+  if (r.total && lr) {
+    aiBtns = `<div class="actions" style="margin:6px 0 2px">
+        <button class="ai big" data-mode="recheck">✅ AI 复查<small>上次的 ${lr.issues} 个问题改好了吗？只看改动过的文件</small></button>
+        ${lr.pending ? `<button class="ai big" data-mode="continue">▶ 继续审查<small>上次还有 ${lr.pending} 个文件没审完</small></button>`
+                     : `<button class="ghost big" data-mode="review">🔄 重新完整审查<small>从头再找一遍问题（结果会和上次不同）</small></button>`}
+      </div>
+      <p class="btnhint">上次 AI 审查：${esc(lr.time)}。改完代码后点“AI 复查”，它会逐条告诉你哪些已解决、哪些还没有。
+        ${lr.pending ? `<button class="linkbtn" data-mode="review">重新完整审查</button>` : ""}</p>`;
+  } else if (r.total) {
+    aiBtns = `<div class="actions" style="grid-template-columns:1fr;margin:6px 0 2px">
+        <button class="ai big" data-mode="review">🤖 AI 审查：让 AI 通读全部 ${r.total} 个文件找问题<small>找出 bug、安全隐患和可以改进的地方；会使用 Claude 额度，文件多时会分批进行</small></button>
+      </div>`;
+  }
+  h += aiBtns + `<div class="row" style="margin:4px 0"><button class="ghost" id="rescan">重新检查文件夹</button><button class="ghost" id="closefolder">关闭</button></div>`;
   if (!r.total) h += `<p class="muted">这个文件夹里没有找到 .py 或 .js 文件。</p>`;
   bad.forEach((f, idx) => {
     h += `<details class="frow ${f.errors ? "err" : "warn"}" ${idx < 5 ? "open" : ""}>
@@ -545,7 +623,9 @@ async function aiReview(mode) {
     } else if (mode === "continue") {
       msg = `接着审查上次没审完的 ${plan.files} 个文件，结果会并进上次的报告。`;
     } else {
-      msg = `AI 将审查全部 ${plan.files} 个文件（约 ${kchars} 个字符）。`;
+      msg = (lr ? "提醒：“重新完整审查”会从头再找一遍问题，结果会和上次不同（通常也会提出新的建议）。\n"
+                + "如果你只是想确认上次的问题改好了没有，请点“取消”，改用“AI 复查”。\n\n" : "")
+        + `AI 将审查全部 ${plan.files} 个文件（约 ${kchars} 个字符）。`;
     }
     if (plan.batches > 1) {
       const lo = Math.ceil(plan.batches / 3) * 2, hi = Math.ceil(plan.batches / 3) * 4;
@@ -659,6 +739,13 @@ function renderRecheck(d) {
       <span class="stat" style="color:var(--err)"><b>${c.not_fixed}</b> 未解决</span>
       ${c.unclear ? `<span class="stat"><b>${c.unclear}</b> 无法判断</span>` : ""}
       <span class="stat" style="color:var(--accent)"><b>${d.new_issues.length}</b> 新问题</span></div>
+    <details class="explain"><summary>❓ 这份报告怎么看</summary>
+      <p style="margin:6px 0">AI 拿着上次报告里的每一条问题，去看你现在的代码，逐条判断：</p>
+      <table><tr><td>✅ 已解决</td><td>改好了（下面会说明是怎么改好的，方便你确认没改错）</td></tr>
+        <tr><td>⚠️ 部分解决</td><td>改了一部分，还差一点（会说明还差什么）</td></tr>
+        <tr><td>❌ 未解决</td><td>问题还在（没改动的文件里的问题，直接算未解决）</td></tr>
+        <tr><td>🆕 新问题</td><td>修改时不小心带进来的新问题</td></tr></table>
+      <p style="margin:6px 0">改完“还要处理”的问题后，再点一次“✅ AI 复查”，直到全部解决。</p></details>
     <p class="muted" style="font-size:12.5px;margin:0 0 4px">对比的是上次 AI 审查（${esc(d.last_time)}）。
       重新审查了 ${d.reviewed.length} 个改动过的文件${d.unchanged ? `，${d.unchanged} 个没改动的文件跳过` : ""}${d.batches > 1 ? `（分 ${d.batches} 批）` : ""}。</p>
     <p style="margin:0 0 8px">${esc(d.overview)}</p>`;
@@ -685,19 +772,34 @@ function renderRecheck(d) {
   h += `<p class="muted" style="font-size:12.5px">没解决的问题和新问题已经记下来了，改完后可以再点“AI 复查”。</p>`;
   addFilters(box, h);
 }
+const EXPLAIN_REVIEW = `<details class="explain"><summary>❓ 这份报告怎么看</summary>
+  <p style="margin:6px 0">AI 像一位资深程序员一样把代码通读了一遍，列出它认为可能出问题、或者可以写得更好的地方。</p>
+  <table><tr><td>🔴 严重</td><td>会出错、会崩溃，或有安全风险 —— <b>建议尽快改</b></td></tr>
+    <tr><td>🟠 中等</td><td>特殊情况下会出问题，或写法有隐患 —— 建议改</td></tr>
+    <tr><td>🟡 轻微</td><td>让代码更清楚、更规范的建议 —— 可改可不改</td></tr></table>
+  <p style="margin:6px 0">没有任何代码能做到“0 个问题”，每次审查也都是重新找，所以会提出新的建议。
+    <b>想确认上次的问题改好了没有，请用“✅ AI 复查”</b>，不要用“重新完整审查”。</p></details>`;
+
 function renderReview(d) {
   const box = $("folderai");
-  const n = s => d.issues.filter(i => i.severity === s).length;
-  setBadge("folderai", n("high") ? "bad" : (d.issues.length ? "warn" : "ok"), d.issues.length ? String(d.issues.length) : "✓");
+  const by = s => d.issues.map((i, k) => ({...i, k: k + 1})).filter(i => i.severity === s);
+  const high = by("high"), medium = by("medium"), low = by("low");
+  setBadge("folderai", high.length ? "bad" : (d.issues.length ? "warn" : "ok"), d.issues.length ? String(d.issues.length) : "✓");
   let h = `<h2>🤖 AI 审查报告</h2>
-    <div class="stats"><span class="stat" style="color:var(--err)"><b>${n("high")}</b> 严重</span>
-      <span class="stat" style="color:#ea580c"><b>${n("medium")}</b> 中等</span>
-      <span class="stat" style="color:var(--warn)"><b>${n("low")}</b> 轻微</span>
+    <div class="stats"><span class="stat" style="color:var(--err)"><b>${high.length}</b> 严重</span>
+      <span class="stat" style="color:#ea580c"><b>${medium.length}</b> 中等</span>
+      <span class="stat" style="color:var(--warn)"><b>${low.length}</b> 轻微</span>
       <span class="stat"><b>${d.reviewed.length}</b> 个文件已审查${d.batches > 1 ? `（分 ${d.batches} 批）` : ""}</span></div>
-    <details open><summary class="muted" style="cursor:pointer;font-size:13px">项目概况</summary><p style="margin:4px 0 8px">${esc(d.overview)}</p></details>`;
+    ${EXPLAIN_REVIEW}`;
+  const first = high.length ? "🔴 严重" : (medium.length ? "🟠 中等" : "");
+  h += `<div class="nextstep">👉 <b>下一步：</b>${first ? `先改${first}的问题（点问题下面的“💡 怎么改”看改法，点文件名直接打开），` : ""}改完后回到“文件夹”标签，点 <b>“✅ AI 复查”</b> 确认改好了没有。</div>`;
+  h += `<details open><summary class="muted" style="cursor:pointer;font-size:13px">项目概况</summary><p style="margin:4px 0 8px">${esc(d.overview)}</p></details>`;
   if (!d.issues.length) h += `<p style="color:var(--ok)">✓ AI 没有发现值得报告的问题。</p>`;
-  else h += filterBar(d.issues) + d.issues.map((i, k) => issueCard(i, k + 1)).join("");
-  if (d.next_steps.length) h += `<h2>👉 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
+  if (high.length) h += `<div class="sevhead">🔴 严重（${high.length}）<span>建议尽快改</span></div>` + high.map(i => issueCard(i, i.k)).join("");
+  if (medium.length) h += `<div class="sevhead">🟠 中等（${medium.length}）<span>建议改</span></div>` + medium.map(i => issueCard(i, i.k)).join("");
+  if (low.length) h += `<details class="lightgroup" ${high.length + medium.length ? "" : "open"}><summary>🟡 轻微建议（${low.length}）<span>可改可不改，点开查看</span></summary>`
+    + low.map(i => issueCard(i, i.k)).join("") + `</details>`;
+  if (d.next_steps.length) h += `<h2>👉 AI 建议接下来</h2><ol>${d.next_steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>`;
   if (d.strengths.length) h += `<details><summary class="muted" style="cursor:pointer">👍 写得好的地方（${d.strengths.length}）</summary><ul>${d.strengths.map(s => `<li>${esc(s)}</li>`).join("")}</ul></details>`;
   h += pendingBox(d);
   addFilters(box, h);
@@ -709,6 +811,7 @@ function aiChoiceFor(what) {
   if ($("ai").value !== "none") return $("ai").value;
   if (!confirm(`“${what}”需要把代码发给 AI，但现在选的是“不用 AI”。\n\n要改成“自动”并继续吗？`)) return null;
   $("ai").value = "auto";
+  updateRunWarn();
   return "auto";
 }
 let lastTests = null;  // {summary, tests, language}
