@@ -50,7 +50,8 @@ a{color:var(--accent)}
 <header>
   <h1>代码检查助手</h1>
   <span class="muted" style="font-size:13px">静态检查 → 安全运行 → AI 讲解错误和修改建议</span>
-  <span class="muted" style="margin-left:auto;font-size:12px"><span id="ver"></span> · <a href="#" id="checkupd">检查更新</a></span>
+  <span class="muted" style="margin-left:auto;font-size:12px"><span id="ver"></span> ·
+    <a href="#" id="whereami" title="">程序位置</a> · <a href="#" id="checkupd">检查更新</a></span>
 </header>
 <div id="updbar"><span id="updmsg"></span><button id="updbtn">一键更新</button></div>
 <nav id="tabbar"><button id="newtab" title="新建标签页（Ctrl+T）">＋</button></nav>
@@ -155,7 +156,18 @@ window.addEventListener("beforeunload", e => {
 
 // ---------- 版本和一键更新 ----------
 let curVersion = null;
-fetch("/api/info").then(r => r.json()).then(d => { curVersion = d.version; $("ver").textContent = "版本 " + d.version; });
+let appRoot = "";
+fetch("/api/info").then(r => r.json()).then(d => {
+  curVersion = d.version; appRoot = d.root || "";
+  $("ver").textContent = "版本 " + d.version; $("whereami").title = appRoot;
+});
+$("whereami").onclick = e => {
+  e.preventDefault();
+  if (!appRoot) return;
+  if (confirm(`代码检查助手装在：\n${appRoot}\n\n要在当前标签页里检查这个文件夹（检查程序自己）吗？`)) {
+    active.frame.contentWindow.postMessage({type: "scan", path: appRoot}, location.origin);
+  }
+};
 async function checkUpdate(manual) {
   const bar = $("updbar"), msg = $("updmsg"), btn = $("updbtn");
   if (manual) { bar.style.display = "flex"; msg.textContent = "正在检查更新…"; btn.style.display = "none"; }

@@ -255,6 +255,9 @@ function markNew(name) {  // 有新内容但不在当前标签：提示一下
   if ($(name).hidden && !$("vb-" + name).textContent) setBadge(name, "new", "新");
 }
 document.querySelectorAll("#vtabs button").forEach(b => b.onclick = () => showView(b.dataset.view));
+window.addEventListener("message", e => {
+  if (e.origin === location.origin && e.source === window.parent && e.data && e.data.type === "scan") scanFolder(e.data.path);
+});
 
 // 告诉外壳：标签页标题、有没有未保存的修改
 function report() {
@@ -422,6 +425,12 @@ function renderFolder(r) {
     h += `</div></details>`;
   }
   r.notes.forEach(n => h += `<p style="color:var(--warn);font-size:13px">${esc(n)}</p>`);
+  const cw = r.copy_warning;
+  if (cw) h += `<div class="cmp" style="border-color:var(--err);background:transparent">
+      ⚠️ <b>这是“代码检查助手”的另一个副本（版本 ${esc(cw.version)}），不是你正在运行的程序（版本 ${esc(cw.running)}）。</b>
+      <div style="font-size:13px;margin-top:4px">它不会自动更新，所以这里查出的问题，可能在正在运行的版本里早就修好了。
+      正在运行的程序在：<code style="overflow-wrap:anywhere">${esc(cw.running_path)}</code>
+      <button class="ghost" id="scanself" style="margin-left:6px">检查正在运行的程序</button></div></div>`;
   const c = r.compare;
   if (c) {
     h += `<div class="cmp">🔁 和上次检查（${esc(c.last_time)}）相比：
@@ -471,6 +480,7 @@ function renderFolder(r) {
     setBadge("folderout", ""); setBadge("folderai", "");
     lastFolder = null; report(); showView("out");
   };
+  if ($("scanself")) $("scanself").onclick = () => scanFolder(cw.running_path);
   if ($("dirsbox")) $("dirsbox").ontoggle = e => dirsOpen = e.target.open;
   box.querySelectorAll("[data-ex]").forEach(el => el.onclick = async () => {
     await setExclude(r.folder, [...(r.exclude || []), el.dataset.ex]); scanFolder(r.folder, true);

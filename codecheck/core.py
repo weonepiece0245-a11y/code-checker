@@ -46,5 +46,6 @@ def check_code(code: str, filename: str | None = None, language: str | None = No
         except Exception as e:  # AI 出错不影响其他结果
             report["ai_error"] = str(e)
     errors = sum(1 for i in issues if i["severity"] == "error")
-    report["passed"] = errors == 0 and (result is None or result["ok"])
+    # 没能运行（比如没装 Node.js）不能算“通过”
+    report["passed"] = errors == 0 and not run_error and (result is None or result["ok"])
     return report

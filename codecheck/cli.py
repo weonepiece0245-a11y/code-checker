@@ -22,6 +22,19 @@ def color(s, c):
     return f"{C[c]}{s}{C['end']}" if sys.stdout.isatty() else s
 
 
+EXPLAIN_LANGS = ["简体中文", "繁體中文", "English"]
+
+
+def timeout_arg(v: str) -> int:
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--timeout 需要是 1~60 之间的整数") from None
+    if not 1 <= n <= 60:
+        raise argparse.ArgumentTypeError("--timeout 需要在 1~60 秒之间")
+    return n
+
+
 def read_text(path: str) -> str:
     """读取代码文件：找不到时给出清楚的提示；中文 Windows 上的 GBK 文件也能读。"""
     try:
@@ -52,15 +65,16 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="codecheck", description="检查代码、运行测试、AI 解释错误")
     p.add_argument("file", help="要检查的代码文件或文件夹，用 - 表示从标准输入读取")
     p.add_argument("--lang", choices=["python", "javascript"], help="编程语言（默认按后缀自动识别）")
-    p.add_argument("--input", default="", help="运行时喂给程序的输入内容")
+    p.add_argument("--input", default="", help="运行时喂给程序的输入内容（写 \\n 表示换行）")
+    p.add_argument("--input-raw", default=None, help="和 --input 一样，但原样传入，\\n 不会被当成换行")
     p.add_argument("--input-file", help="从文件读取运行时输入")
     p.add_argument("--no-run", action="store_true", help="只做静态检查，不运行")
-    p.add_argument("--timeout", type=int, default=5, help="运行超时秒数（默认 5）")
+    p.add_argument("--timeout", type=timeout_arg, default=5, help="运行超时秒数，1~60（默认 5）")
     p.add_argument("--sandbox", choices=["local", "docker"], default="local",
                    help="local=本机受限运行；docker=容器隔离运行（运行别人的代码时推荐）")
     p.add_argument("--ai", choices=["auto", "api", "cli", "none"], default="auto",
                    help="auto=优先用 Claude Code 订阅，没有才用 API key；none=不用 AI")
-    p.add_argument("--explain-lang", default="简体中文", help="AI 讲解使用的语言（默认简体中文）")
+    p.add_argument("--explain-lang", default="简体中文", choices=EXPLAIN_LANGS, help="AI 讲解使用的语言（默认简体中文）")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     p.add_argument("--tests", action="store_true", help="让 AI 生成测试并逐个运行")
     p.add_argument("--ai-review", action="store_true", help="检查文件夹时，再让 AI 审查整个项目")
@@ -93,7 +107,12 @@ def main(argv=None):
         return 1 if r["with_errors"] else 0
 
     code = sys.stdin.read() if a.file == "-" else read_text(a.file)
-    stdin = read_text(a.input_file) if a.input_file else a.input.replace("\\n", "\n")
+    if a.input_file:
+        stdin = read_text(a.input_file)
+    elif a.input_raw is not None:
+        stdin = a.input_raw
+    else:
+        stdin = a.input.replace("\\n", "\n")
     if not a.json and a.ai != "none":
         print(color("正在检查并请 AI 分析，可能需要几十秒……", "dim"), file=sys.stderr)
     r = check_code(code, None if a.file == "-" else a.file, a.lang, stdin, not a.no_run,

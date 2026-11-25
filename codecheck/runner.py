@@ -176,6 +176,9 @@ def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: in
     cmd = [part.replace("{file}", path) for part in lang.run_cmd] + list(extra_args or [])
     if cmd[0] == "python3":
         cmd[0] = console_python()
+    if not (os.path.isabs(cmd[0]) and os.path.isfile(cmd[0])) and not shutil.which(cmd[0]):
+        need = "Node.js（https://nodejs.org 下载 LTS 版本）" if lang.key == "javascript" else lang.name
+        raise RuntimeError(f"找不到 {cmd[0]}，没法运行 {lang.name} 代码。请先安装 {need}")
     cwd = workdir if workdir and os.path.isdir(workdir) else os.path.dirname(path)
     env = _clean_env(cwd)
     prefix, preexec, job = [], None, None
@@ -186,10 +189,16 @@ def run_local(lang: Language, path: str, stdin: str, timeout: int, memory_mb: in
         if not prefix:
             preexec = _posix_limits(lang.key, timeout, memory_mb)
     start = time.monotonic()
-    proc = subprocess.Popen(prefix + cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            creationflags=NO_WINDOW, start_new_session=sys.platform != "win32",
-                            cwd=cwd, env=env, text=True, encoding="utf-8",
-                            errors="replace", preexec_fn=preexec)
+    try:
+        proc = subprocess.Popen(prefix + cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                creationflags=NO_WINDOW, start_new_session=sys.platform != "win32",
+                                cwd=cwd, env=env, text=True, encoding="utf-8",
+                                errors="replace", preexec_fn=preexec)
+    except FileNotFoundError:
+        if job:
+            job.close()
+        need = "Node.js（https://nodejs.org 下载 LTS 版本）" if lang.key == "javascript" else lang.name
+        raise RuntimeError(f"找不到 {os.path.basename(cmd[0])}，没法运行 {lang.name} 代码。请先安装 {need}") from None
     if job:
         job.assign(proc)
     timed_out = False

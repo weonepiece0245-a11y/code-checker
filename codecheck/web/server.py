@@ -28,6 +28,7 @@ RUN_SLOTS = threading.BoundedSemaphore(2)
 Lang = Literal["python", "javascript"]
 Sandbox = Literal["local", "docker"]
 AIBackend = Literal["auto", "api", "cli", "none"]
+ExplainLang = Literal["简体中文", "繁體中文", "English"]  # 固定选项：这个值会写进给 AI 的说明里
 LOCAL_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -60,7 +61,7 @@ class CheckRequest(BaseModel):
     timeout: int = Field(5, ge=1, le=60)
     sandbox: Sandbox = "local"
     ai: AIBackend = "auto"
-    explain_lang: str = Field("简体中文", max_length=20)
+    explain_lang: ExplainLang = "简体中文"
     workdir: str | None = None
 
 
@@ -93,7 +94,7 @@ def health():
 
 @app.get("/api/info")
 def info():
-    return {"ai_auto": pick_backend("auto"), "version": __version__}
+    return {"ai_auto": pick_backend("auto"), "version": __version__, "root": str(Path(__file__).resolve().parents[2])}
 
 
 @app.get("/api/update/check")
@@ -133,7 +134,7 @@ class GenTestsRequest(BaseModel):
     code: str = Field(max_length=200_000)
     language: Lang | None = None
     ai: AIBackend = "auto"
-    explain_lang: str = Field("简体中文", max_length=20)
+    explain_lang: ExplainLang = "简体中文"
 
 
 @app.post("/api/tests/generate")
@@ -245,7 +246,7 @@ class AIReviewRequest(BaseModel):
     path: str
     exclude: list[str] | None = None
     ai: AIBackend = "auto"
-    explain_lang: str = Field("简体中文", max_length=20)
+    explain_lang: ExplainLang = "简体中文"
 
 
 @app.post("/api/fs/ai_review")

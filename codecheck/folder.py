@@ -6,7 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from collections import Counter
 
-from . import static_check, store
+from pathlib import Path
+
+from . import __version__, static_check, store
+
+APP_ROOT = Path(__file__).resolve().parent.parent
 from .proc import NO_WINDOW
 
 EXT = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript"}
@@ -126,8 +130,13 @@ def group_by_dir(rels: list[str], depth: int = 2) -> list[dict]:
 
 
 def _node_check(path: str) -> list[static_check.Issue]:
-    p = subprocess.run(["node", "--check", path], capture_output=True, text=True, timeout=20,
-                       encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    try:
+        p = subprocess.run(["node", "--check", path], capture_output=True, text=True, timeout=20,
+                           encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return [static_check.Issue(0, 0, "tool", "语法检查超时，跳过了这个文件", "warning")]
+    except OSError as e:
+        return [static_check.Issue(0, 0, "tool", f"没法运行 node：{e}", "warning")]
     if p.returncode == 0:
         return []
     line = 0
@@ -203,7 +212,24 @@ def scan(folder: str, exclude: list[str] | None = None, compare: bool = True) ->
     }
     if compare:
         result["compare"] = compare_with_last(result)
+    result["copy_warning"] = copy_warning(folder)
     return result
+
+
+def copy_warning(folder: str) -> dict | None:
+    """选的文件夹是不是“代码检查助手”的另一个副本？版本不一样时提醒：它不是正在运行的程序。"""
+    f = Path(folder)
+    if not ((f / "codecheck" / "__init__.py").is_file() and (f / "version.txt").is_file()):
+        return None
+    if f.resolve() == APP_ROOT:
+        return None
+    try:
+        ver = (f / "version.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        ver = "未知"
+    if ver == __version__:
+        return None
+    return {"version": ver, "running": __version__, "running_path": str(APP_ROOT)}
 
 
 def _keys(files: list[dict]) -> list[tuple]:

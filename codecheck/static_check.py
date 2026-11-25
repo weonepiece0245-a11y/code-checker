@@ -33,10 +33,14 @@ def _ruff_cmd():
 def check_python(path: str) -> list[Issue]:
     issues: list[Issue] = []
     # 1) 语法检查
-    proc = subprocess.run([console_python(), "-I", "-m", "py_compile", path], creationflags=NO_WINDOW,
-                          capture_output=True, text=True, timeout=20,
-                          encoding="utf-8", errors="replace")
-    if proc.returncode != 0:
+    try:
+        proc = subprocess.run([console_python(), "-I", "-m", "py_compile", path], creationflags=NO_WINDOW,
+                              capture_output=True, text=True, timeout=20,
+                              encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        proc = None
+        issues.append(Issue(0, 0, "tool", "语法检查超时（文件太大或电脑太忙），跳过了语法检查", "warning"))
+    if proc is not None and proc.returncode != 0:
         line = 0
         for part in proc.stderr.split(","):
             part = part.strip()
@@ -170,8 +174,11 @@ def check_javascript(path: str) -> list[Issue]:
     issues: list[Issue] = []
     if not shutil.which("node"):
         return [Issue(0, 0, "tool", "没有安装 Node.js，无法检查 JavaScript", "warning")]
-    proc = subprocess.run(["node", "--check", path], creationflags=NO_WINDOW, capture_output=True, text=True, timeout=20,
-                          encoding="utf-8", errors="replace")
+    try:
+        proc = subprocess.run(["node", "--check", path], creationflags=NO_WINDOW, capture_output=True, text=True,
+                              timeout=20, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return [Issue(0, 0, "tool", "语法检查超时（文件太大或电脑太忙），跳过了语法检查", "warning")]
     if proc.returncode != 0:
         line = 0
         first = proc.stderr.splitlines()[0] if proc.stderr else ""
