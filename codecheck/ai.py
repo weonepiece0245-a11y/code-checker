@@ -208,13 +208,20 @@ class BackendUnavailable(RuntimeError):
     """Claude Code 本身用不了：没安装、没登录、登录失效、订阅不可用。只有这种错误才会改用 API key。"""
 
 
-# 用来识别 Claude Code 原始错误信息里的“没登录”（英文为主；不包含我们自己附加的中文提示）
-_LOGIN_HINTS = ("please run /login", "not logged in", "log in", "login required", "not authenticated",
-                "authentication failed", "unauthorized", "invalid api key", "oauth token", "subscription")
+# 用来识别 Claude Code 原始错误信息里的“没登录”（英文为主；不包含我们自己附加的中文提示）。
+# 只用很明确的说法；像 “subscription”“unauthorized” 这种也会出现在“额度用完”里的词不算。
+_LOGIN_HINTS = ("please run /login", "not logged in", "login required", "not authenticated",
+                "authentication failed", "invalid api key", "oauth token has expired", "token expired",
+                "credentials not found")
+# 出现这些词就一定不是“没登录”：额度用完、限流、网络问题照常报出来，不悄悄换成付费的 API key
+_NOT_LOGIN = re.compile(r"\b(limits?|quota|usage|rate[- ]?limit\w*|overloaded|credits?|billing|network|"
+                        r"timeout|timed out|econn\w*|enotfound)\b")
 
 
 def _is_login_error(message: str) -> bool:
     m = message.lower()
+    if _NOT_LOGIN.search(m):
+        return False
     return any(h in m for h in _LOGIN_HINTS)
 
 

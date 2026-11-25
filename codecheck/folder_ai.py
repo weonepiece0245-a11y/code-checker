@@ -7,6 +7,7 @@
 """
 import hashlib
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -202,7 +203,10 @@ def preview(path: str, mode: str = "review", exclude: list[str] | None = None) -
     """开始前告诉用户：要审查多少文件、分几批、大约多少字符。不读文件内容（复查除外）。"""
     scan = folder.scan(path, exclude, compare=False)
     last = last_review(path)
-    files = _select(scan, mode, last)
+    if mode == "recheck" and last:
+        files, _ = _recheck_files(scan, last, _current_prints(scan))
+    else:
+        files = _select(scan, mode, last)
     batches = make_batches(files)
     out = {"mode": mode, "total": scan["total"], "files": len(files), "batches": len(batches),
            "chars": sum(_estimate(f) for f in files),
@@ -230,6 +234,51 @@ def _select(scan: dict, mode: str, last: dict | None, now_prints: dict | None = 
         return [f for f in files
                 if _norm(f["rel"]) in pending or old.get(_norm(f["rel"])) != now.get(_norm(f["rel"]))]
     return files
+
+
+def _mentioned(issue: dict, scan: dict) -> set[str]:
+    """一条问题的说明里提到的其他文件（比如“folder_ai._save 也有同样的问题”“请确认 files.py 里……”）。
+    复查这条问题时，要把这些文件也给 AI 看，否则只能判断“无法确认”；它们改了，这条问题也要重新判断。"""
+    text = " ".join(str(issue.get(k, "")) for k in ("title", "explanation", "suggestion"))
+    own = _norm(issue.get("file", ""))
+    names: dict[str, list[str]] = {}
+    for f in scan["files"]:
+        rel = _norm(f["rel"])
+        names.setdefault(rel.rsplit("/", 1)[-1], []).append(rel)
+    found = set()
+    for base, rels in names.items():
+        stem = base.rsplit(".", 1)[0]
+        hit = re.search(r"(?<![\w])" + re.escape(base) + r"(?![\w])", text, re.I) or (
+            len(stem) >= 4 and re.search(r"(?<![\w.])" + re.escape(stem) + r"\.(?=[A-Za-z_])", text))
+        if not hit:
+            continue
+        if len(rels) == 1:
+            found.add(rels[0])
+        else:  # 同名文件有好几个（比如 __init__.py）：只认写了完整路径的
+            found.update(r for r in rels if r in text.replace("\\", "/").lower())
+    found.discard(own)
+    return set(sorted(found)[:5])
+
+
+def _recheck_files(scan: dict, last: dict, now_prints: dict) -> tuple[list[dict], set[str]]:
+    """复查要发送哪些文件。返回 (文件列表, 其中“没改动、只是和问题有关”的文件)。
+
+    1. 改动过的文件、新文件、上次没审完的文件；
+    2. 没改动的文件，但它的某条问题提到的其他文件改了（问题可能是在别的文件里解决的）；
+    3. 要判断的问题提到的其他文件（给 AI 对照着看）。"""
+    changed = {_norm(f["rel"]) for f in _select(scan, "recheck", last, now_prints)}
+    send = set(changed)
+    issues = last.get("issues", [])
+    related = [(_norm(i["file"]), _mentioned(i, scan)) for i in issues]
+    existing = {_norm(f["rel"]) for f in scan["files"]}
+    for own, rel in related:
+        if own in existing and own not in send and rel & changed:
+            send.add(own)
+    for own, rel in related:
+        if own in send:
+            send |= rel
+    files = [f for f in scan["files"] if _norm(f["rel"]) in send]
+    return files, send - changed
 
 
 # ---------- 分批运行 ----------
@@ -414,18 +463,27 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
         raise ValueError("这个文件夹还没有做过 AI 审查，请先点“AI 审查整个文件夹”")
     scan = folder.scan(path, exclude, compare=False)
     now_prints = _current_prints(scan)  # 只算一遍，挑文件和判断“没改动”都用它
-    files = _select(scan, "recheck", last, now_prints)
+    files, context_only = _recheck_files(scan, last, now_prints)
+    sent = {_norm(f["rel"]) for f in files}
     old_prints = last.get("prints") or {}
     existing = {_norm(f["rel"]) for f in scan["files"]}
+
+    def on_disk(issue: dict) -> bool:  # 文件还在，只是这次被排除了（没有检查）
+        rel = issue["file"].replace("\\", "/").lstrip("/")
+        return ".." not in rel.split("/") and os.path.isfile(os.path.join(scan["folder"], rel))
 
     previous = [dict(i, k=n) for n, i in enumerate(last["issues"], 1)]
     status: dict[int, dict] = {}
     for i in previous:
         rel = _norm(i["file"])
         if rel not in existing:
-            status[i["k"]] = {"status": "unclear", "note": "这个文件已经不在了（被删除、改名或被排除），"
-                              "这次没法判断；下次复查不再列出这一条。", "line": 0}
-        elif old_prints and old_prints.get(rel) == now_prints.get(rel):
+            if on_disk(i):
+                status[i["k"]] = {"status": "unclear", "note": "这个文件这次被排除了，没有检查。问题先保留，"
+                                  "取消排除后再复查就会重新判断。", "line": i["line"]}
+            else:
+                status[i["k"]] = {"status": "unclear", "note": "这个文件已经不在了（被删除或改名），"
+                                  "这次没法判断；下次复查不再列出这一条。", "line": 0}
+        elif rel not in sent:
             status[i["k"]] = {"status": "not_fixed", "note": UNCHANGED_NOTE, "line": i["line"]}
 
     batches = make_batches(files) if files else []
@@ -442,6 +500,10 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
                       + (f" 第 {i['line']} 行" if i["line"] else "")
                       + f"\n    说明：{i['explanation']}\n    当时的建议：{i['suggestion']}" for i in prev]
         head = [f"===== 上次审查（{last['time']}）在这批文件里发现的问题 =====\n" + ("\n".join(prev_lines) or "（这批文件上次没有发现问题）")]
+        ctx = [f["rel"] for f in batch if _norm(f["rel"]) in context_only]
+        if ctx:
+            head.append("说明：下面这些文件和上次审查时一样、没有改动，只是因为上面的问题牵涉到它们，才发给你对照着判断；"
+                        "不要为它们报告新问题：" + "、".join(ctx))
         if total > 1:
             head += [BATCH_NOTE.format(total=total, index=index + 1, count=len(batch)), project_list]
         return "\n\n".join(head + ["===== 这批文件现在的代码 =====", *blocks])
@@ -489,9 +551,10 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
     new_issues.sort(key=lambda i: ORDER.get(i["severity"], 3))
 
     failed_files = [f["rel"] for i, _ in failed for f in batches[i]]
-    # 记下还要处理的问题给下次复查；文件已经不在的问题不再记（否则每次都显示“无法判断”，永远清不掉）
+    # 记下还要处理的问题给下次复查。文件已经删掉的问题不再记（否则每次都显示“无法判断”，永远清不掉）；
+    # 只是这次被排除的文件，问题照样保留，取消排除后还能复查
     still = [i for i in result_prev if i["status"] in ("partial", "not_fixed", "unclear")
-             and _norm(i["file"]) in existing]
+             and (_norm(i["file"]) in existing or on_disk(i))]
     overview = " ".join(overviews[:3]) if overviews else "这次没有文件需要重新审查：上次有问题的文件都没有改动。"
     # 还没审完的文件：只记这次仍然失败或读不到的。上次没审完的文件这次已经被选进来审过了，
     # 不能再原样写回去（否则每次复查都会重复发送，界面也一直显示“没审完”）
@@ -506,6 +569,7 @@ def recheck(path: str, explain_lang: str = "简体中文", backend: str = "auto"
             "counts": counts, "new_issues": new_issues, "next_steps": next_steps[:5],
             "folder": scan["folder"], "reviewed": [f["rel"] for f in files], "batches": total,
             "unchanged": scan["total"] - len(files),
+            "context_files": sorted(f["rel"] for f in files if _norm(f["rel"]) in context_only),
             "failed_batches": [{"index": i + 1, "error": e} for i, e in sorted(failed)],
             "pending": sorted(set(still_pending)), "pending_groups": folder.group_by_dir(still_pending),
             "skipped": [], "skipped_groups": [], "ai_backend": used,
@@ -517,7 +581,9 @@ STATUS = {"fixed": "✅ 已解决", "partial": "⚠️ 部分解决", "not_fixed
 
 def format_recheck(d: dict) -> str:
     c = d["counts"]
-    lines = [f"和上次 AI 审查（{d['last_time']}）相比（重新审查了 {len(d['reviewed'])} 个改动过的文件，"
+    ctx = len(d.get("context_files", []))
+    lines = [f"和上次 AI 审查（{d['last_time']}）相比（重新审查了 {len(d['reviewed'])} 个文件"
+             + (f"，其中 {ctx} 个没改动、但和要复查的问题有关" if ctx else "") + "，"
              f"{d.get('unchanged', 0)} 个没改动的文件跳过）：", d["overview"],
              f"上次 {len(d['previous'])} 个问题：已解决 {c['fixed']} · 部分解决 {c['partial']} · "
              f"未解决 {c['not_fixed']} · 无法判断 {c['unclear']}"]

@@ -53,6 +53,16 @@ def is_allowed(path: str) -> bool:
         return any(k == d or k.startswith(d.rstrip(os.sep) + os.sep) for d in _allowed_dirs)
 
 
+def was_opened(path: str) -> bool:
+    """这个文件在这次运行期间是不是用“打开文件”打开过（只有打开过的才能保存）。"""
+    with _allow_lock:
+        return _key(path) in _opened
+
+
+def has_allowed_ext(path: str) -> bool:
+    return Path(path).suffix.lower() in ALLOWED
+
+
 # 自动化测试用：启动程序时通过环境变量预先放行一些文件夹（普通使用不需要，也不会设置它）
 for _d in filter(None, os.environ.get("CODECHECK_ALLOW_DIRS", "").split(os.pathsep)):
     allow_dir(_d)
@@ -85,7 +95,7 @@ def pick(kind: str) -> str | None:
 
 
 def _check_ext(path: str):
-    if Path(path).suffix.lower() not in ALLOWED:
+    if not has_allowed_ext(path):
         raise ValueError("只能打开 .py / .js / .mjs / .cjs 文件")
 
 
@@ -108,9 +118,7 @@ def read(path: str) -> dict:
 def save(path: str, content: str, encoding: str = "utf-8", crlf: bool = False) -> dict:
     path = os.path.abspath(path)
     _check_ext(path)
-    with _allow_lock:
-        opened = _key(path) in _opened
-    if not opened:
+    if not was_opened(path):
         raise PermissionError("只能保存回之前打开过的文件")
     if not os.path.isdir(os.path.dirname(path)):
         raise ValueError("文件夹不存在")

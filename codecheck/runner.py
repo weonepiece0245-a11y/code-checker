@@ -329,7 +329,11 @@ def _ensure_image(image: str) -> str:
     """确认 Docker 运行环境已经下载好；第一次用时先下载（可能要几分钟），不算进代码的运行时间。"""
     if image in _PULLED:
         return ""
-    r = subprocess.run(["docker", "image", "inspect", image], capture_output=True, creationflags=NO_WINDOW, timeout=30)
+    try:
+        r = subprocess.run(["docker", "image", "inspect", image], capture_output=True, creationflags=NO_WINDOW,
+                           timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Docker 没有反应：请确认 Docker Desktop 已经启动并且运行正常，或者改用“本机”运行") from None
     if r.returncode == 0:
         _PULLED.add(image)
         return ""
@@ -368,14 +372,14 @@ def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: i
         out, err, code = p.stdout, p.stderr, p.returncode
     except subprocess.TimeoutExpired as e:
         # 本机的 docker 命令超时只会结束客户端，容器本身要单独停掉
-        subprocess.run(["docker", "kill", name], capture_output=True, creationflags=NO_WINDOW, timeout=30)
+        _docker_quiet("kill", name)
         killed_by_us = True
         out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
         code = None
     dur = int((time.monotonic() - start) * 1000)
     state = _container_state(name)  # 删掉容器前先看它的状态
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True, creationflags=NO_WINDOW, timeout=30)
+    _docker_quiet("rm", "-f", name)
     if state is None:  # 容器根本没建起来：是 Docker 自己出了问题，不是用户程序的退出码
         raise RuntimeError("Docker 启动失败：" + (err.strip() or "未知原因")[-300:])
     if killed_by_us:
@@ -387,6 +391,14 @@ def run_docker(lang: Language, path: str, stdin: str, timeout: int, memory_mb: i
         return RunResult(None, _clip(out), _clip(err), dur, True, "docker",
                          (f"超过 {timeout} 秒被强制停止（可能是死循环或在等待输入）" + pulled_note).strip())
     return RunResult(code, _clip(out), _clip(err), dur, False, "docker", pulled_note)
+
+
+def _docker_quiet(*args: str) -> None:
+    """停止或删除容器这类“收尾”命令：Docker 卡住时也不能让整个检查出错。"""
+    try:
+        subprocess.run(["docker", *args], capture_output=True, creationflags=NO_WINDOW, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _container_state(name: str) -> dict | None:

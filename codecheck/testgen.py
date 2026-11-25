@@ -221,6 +221,108 @@ def _py_risk(code: str) -> list[str]:
     return found
 
 
+# 被测代码里这些模块/内置函数真的能动文件、联网、执行命令（用来判断被测代码里的哪些函数“有危险”）
+DANGER_MODULES = {"os", "shutil", "subprocess", "socket", "pathlib", "ctypes", "importlib", "builtins", "io",
+                  "urllib", "requests", "httpx", "http", "ftplib", "smtplib", "telnetlib", "pty",
+                  "multiprocessing", "tempfile", "glob", "webbrowser", "pickle", "shelve", "sqlite3", "aiohttp"}
+DANGER_BUILTINS = {"open", "eval", "exec", "compile", "__import__"}
+
+
+def _py_source_risky(source: str) -> dict[str, str]:
+    """被测代码里有哪些名字不能让测试直接用：{名字: 原因}。
+
+    测试和被测代码在同一个命名空间里运行。被测代码写了 import os as o、from os import remove，
+    测试里写 o.remove(...)、remove(...) 就能绕过只看测试代码的检查（提示注入最可能这样做）。
+    所以这里把被测代码导入的模块别名、导入的函数，以及用到危险操作的函数、类、变量都找出来。"""
+    import ast
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return {}
+    risky: dict[str, str] = {}
+    danger: set[str] = set(DANGER_BUILTINS)  # 真正危险的名字（用来判断函数、变量）
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                root = a.name.split(".")[0]
+                name = a.asname or root
+                if root not in SAFE_MODULES:
+                    risky[name] = f"被测代码导入的模块 {a.name}（名字 {name}）"
+                if root in DANGER_MODULES:
+                    danger.add(name)
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if root in SAFE_MODULES and not node.level:
+                continue
+            for a in node.names:
+                if a.name == "*":
+                    risky["*"] = f"被测代码用了 from {node.module} import *，没法确认测试用到的名字是否安全"
+                    continue
+                name = a.asname or a.name
+                risky[name] = f"被测代码从 {node.module or '.'} 导入的 {a.name}"
+                if root in DANGER_MODULES or node.level:
+                    danger.add(name)
+
+    def uses_danger(n) -> bool:
+        return any(isinstance(x, ast.Name) and x.id in danger for x in ast.walk(n))
+
+    for _ in range(5):  # 函数 A 调用了危险函数 B，A 也算危险：多走几遍直到不再变化
+        before = len(danger)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name not in danger:
+                if uses_danger(node):
+                    danger.add(node.name)
+                    risky[node.name] = f"被测代码里的 {node.name}（里面有读写文件、联网或执行命令之类的操作）"
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None and uses_danger(node.value):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for t in targets:
+                    for x in ast.walk(t):
+                        if isinstance(x, ast.Name) and x.id not in danger:
+                            danger.add(x.id)
+                            risky[x.id] = f"被测代码里的 {x.id}（指向读写文件、联网或执行命令之类的操作）"
+        if len(danger) == before:
+            break
+    return risky
+
+
+def _py_test_uses(code: str, risky: dict[str, str]) -> list[str]:
+    import ast
+    if not risky:
+        return []
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return []
+    # 测试自己给这个名字赋值也算（否则写 o = o 再用 o 就能绕过）
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    found = [risky[n] for n in sorted(used) if n in risky]
+    if "*" in risky and used:
+        found.append(risky["*"])
+    return found
+
+
+_JS_BIND = [  # 被测代码里把模块绑定到名字上的写法
+    re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\("),
+    re.compile(r"\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:await\s+)?(?:require|import)\s*\("),
+    re.compile(r"^\s*import\s+([A-Za-z_$][\w$]*)\s*(?:,|\s+from\b)", re.M),
+    re.compile(r"^\s*import\s+\*\s+as\s+([A-Za-z_$][\w$]*)", re.M),
+    re.compile(r"^\s*import\s*(?:[A-Za-z_$][\w$]*\s*,\s*)?\{([^}]*)\}", re.M),
+]
+
+
+def _js_source_risky(source: str) -> dict[str, str]:
+    """JavaScript 版：被测代码里通过 require/import 得到的名字，测试不能直接用。"""
+    risky: dict[str, str] = {}
+    for pat in _JS_BIND:
+        for m in pat.finditer(source):
+            for part in m.group(1).split(","):
+                # { a, b: c, d as e } 取真正绑定的名字（c、e）
+                name = re.split(r"\s*:\s*|\s+as\s+", part.strip())[-1].strip()
+                if re.fullmatch(r"[A-Za-z_$][\w$]*", name):
+                    risky[name] = f"被测代码导入的 {name}"
+    return risky
+
+
 _JS_RISKY = [
     (r"\brequire\b|\bimport\s*\(|^\s*import\s", "导入模块"),
     (r"\b(process|globalThis|global|window|Deno|Bun)\b", "访问进程或全局对象"),
@@ -231,16 +333,23 @@ _JS_RISKY = [
 ]
 
 
-def risk_of(test: dict, lang_key: str) -> str:
+def source_risky(source: str, lang_key: str) -> dict[str, str]:
+    return _py_source_risky(source) if lang_key == "python" else _js_source_risky(source)
+
+
+def risk_of(test: dict, lang_key: str, risky_names: dict[str, str] | None = None) -> str:
     """测试代码里有没有危险操作；有的话返回说明，没有返回空字符串。
-    只看 AI 写的测试代码；“运行整个程序”类的测试没有额外代码，风险就是被测代码本身。"""
+    risky_names：被测代码里不能让测试直接用的名字（见 source_risky）。
+    “运行整个程序”类的测试没有额外代码，风险就是被测代码本身。"""
     code = test.get("code") or ""
     if not code.strip():
         return ""
     if lang_key == "python":
-        found = _py_risk(code)
+        found = _py_risk(code) + _py_test_uses(code, risky_names or {})
     else:
         found = [why for pat, why in _JS_RISKY if re.search(pat, code, re.M)]
+        found += [why for name, why in (risky_names or {}).items()
+                  if re.search(r"(?<![\w$.])" + re.escape(name) + r"(?![\w$])(?!\s*:(?!:))", code)]
     return "、".join(dict.fromkeys(found))[:200]
 
 
@@ -308,8 +417,9 @@ def run(code: str, tests: list[dict], language: str | None = None, timeout: int 
             f.write(h_src)
         test_path = os.path.join(tmp, "test" + lang.suffix)
         esm = lang.key == "javascript" and _is_esm(code, source_path)
+        risky_names = source_risky(code, lang.key)
         for n, t in enumerate(tests, 1):
-            risk = risk_of(t, lang.key)
+            risk = risk_of(t, lang.key, risky_names)
             allowed = allow_risky is True or (isinstance(allow_risky, list) and n in allow_risky)
             skip_reason = ""
             if risk and not allowed:

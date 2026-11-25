@@ -47,7 +47,11 @@ UPDATING = threading.Event()               # 正在下载/安装更新：这期�
 SLOT_WAIT = 20                             # 检查排队最多等几秒，等不到就提示“太忙”
 # 后台任务：分批审查可能要十几分钟，网页定时来问进度
 JOBS: dict[str, dict] = {}
-JOBS_LOCK = threading.Lock()
+JOBS_LOCK = threading.Lock()                # 也保护下面的 ACTIVE，以及和 UPDATING 的配合
+ACTIVE = {"ai_calls": 0}                    # 正在进行、但不占运行名额的 AI 调用（生成测试）
+# Docker 能不能用：第一次有人问的时候在后台检查（docker info 可能要几秒），能用就默认用 Docker 隔离运行
+DOCKER_OK: dict = {}
+_docker_lock = threading.Lock()
 
 Lang = Literal["python", "javascript"]
 Sandbox = Literal["local", "docker"]
@@ -107,6 +111,19 @@ class _slot:
         RUN_SLOTS.release()
 
 
+class _ai_call:
+    """生成测试这类要等 AI 几十秒、但不占运行名额的请求：登记一下，更新前就知道它还在进行。"""
+    def __enter__(self):
+        with JOBS_LOCK:  # 和 update_apply 用同一把锁：要么更新看见这个请求，要么这里看见“正在更新”
+            if UPDATING.is_set():
+                raise HTTPException(503, "程序正在更新，马上会重启，请稍等再试")
+            ACTIVE["ai_calls"] += 1
+
+    def __exit__(self, *exc):
+        with JOBS_LOCK:
+            ACTIVE["ai_calls"] -= 1
+
+
 def _real_file(path: str | None) -> str | None:
     """“在原位置运行”只接受：确实存在、是代码文件、并且是用户选过的文件。"""
     if not path:
@@ -141,11 +158,6 @@ def workspace():
 def health():
     """给启动程序确认“服务已经起来了”用：不需要令牌，也不包含任何敏感信息。"""
     return {"app": "codecheck", "version": __version__}
-
-
-# Docker 能不能用：第一次有人问的时候在后台检查（docker info 可能要几秒），能用就默认用 Docker 隔离运行
-DOCKER_OK: dict = {}
-_docker_lock = threading.Lock()
 
 
 def _check_docker():
@@ -192,8 +204,11 @@ def _busy_reason() -> str:
     """有没有正在进行的检查或审查（更新会重启程序，会把它们打断）。"""
     with JOBS_LOCK:
         jobs = sum(1 for j in JOBS.values() if j["status"] == "running")
+        calls = ACTIVE["ai_calls"]
     if jobs:
         return f"有 {jobs} 个 AI 审查正在进行"
+    if calls:
+        return "AI 正在生成测试"
     taken = 0
     while taken < MAX_RUN_SLOTS and RUN_SLOTS.acquire(blocking=False):
         taken += 1
@@ -263,12 +278,13 @@ class GenTestsRequest(BaseModel):
 
 @app.post("/api/tests/generate")
 def tests_generate(req: GenTestsRequest):
-    try:
-        source = _real_file(req.source_path)
-        language = req.language or detect(source, req.code).key
-        return testgen.generate(req.code, language, req.explain_lang, req.ai, source_path=source)
-    except Exception as e:
-        return {"error": str(e)}
+    with _ai_call():
+        try:
+            source = _real_file(req.source_path)
+            language = req.language or detect(source, req.code).key
+            return testgen.generate(req.code, language, req.explain_lang, req.ai, source_path=source)
+        except Exception as e:
+            return {"error": str(e)}
 
 
 class RunTestsRequest(BaseModel):
@@ -314,7 +330,11 @@ class PathRequest(BaseModel):
 @app.post("/api/fs/read")
 def fs_read(req: PathRequest):
     try:
-        if not files.is_allowed(req.path):  # files.read 里也会再查一次（双重保险）
+        # 服务端先查一遍（files.read 里还会再查一次，双重保险）：
+        # 只能是代码文件，并且是用户选过的文件，或用户选过的文件夹里的文件
+        if not files.has_allowed_ext(req.path):
+            raise ValueError("只能打开 .py / .js / .mjs / .cjs 文件")
+        if not files.is_allowed(req.path):
             raise PermissionError("只能打开你用“打开文件”选过的文件，或“检查文件夹”选过的文件夹里的文件")
         return files.read(req.path)
     except Exception as e:
@@ -331,7 +351,8 @@ class SaveRequest(BaseModel):
 @app.post("/api/fs/save")
 def fs_save(req: SaveRequest):
     try:
-        if not files.is_allowed(req.path):  # files.save 里还会确认是之前打开过的文件
+        # 只能保存回这次运行期间打开过的代码文件（不能新建，也不能写别的路径）
+        if not files.has_allowed_ext(req.path) or not files.was_opened(req.path):
             raise PermissionError("只能保存回之前打开过的文件")
         return files.save(req.path, req.content, req.encoding, req.crlf)
     except Exception as e:
@@ -404,20 +425,7 @@ def _run_review(req: AIReviewRequest, progress=None, cancel=None) -> dict:
     return folder_ai.review(path, req.explain_lang, req.ai, _exclude(req), progress, cancel, mode=req.mode)
 
 
-@app.post("/api/fs/ai_review")
-def fs_ai_review(req: AIReviewRequest):
-    try:
-        return _run_review(req)
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.post("/api/fs/ai_recheck")
-def fs_ai_recheck(req: AIReviewRequest):
-    req.mode = "recheck"
-    return fs_ai_review(req)
-
-
+# AI 审查只通过后台任务进行：能看进度、能取消，更新前也知道它还在进行
 @app.post("/api/fs/ai_job")
 def fs_ai_job(req: AIReviewRequest):
     try:

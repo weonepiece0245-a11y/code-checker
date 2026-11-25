@@ -755,7 +755,7 @@ function renderRecheck(d) {
         <tr><td>🆕 新问题</td><td>修改时不小心带进来的新问题</td></tr></table>
       <p style="margin:6px 0">改完“还要处理”的问题后，再点一次“✅ AI 复查”，直到全部解决。</p></details>
     <p class="muted" style="font-size:12.5px;margin:0 0 4px">对比的是上次 AI 审查（${esc(d.last_time)}）。
-      重新审查了 ${d.reviewed.length} 个改动过的文件${d.unchanged ? `，${d.unchanged} 个没改动的文件跳过` : ""}${d.batches > 1 ? `（分 ${d.batches} 批）` : ""}。</p>
+      重新审查了 ${d.reviewed.length} 个文件${(d.context_files || []).length ? `（其中 ${d.context_files.length} 个没改动，但和要复查的问题有关，一起给 AI 对照）` : ""}${d.unchanged ? `，${d.unchanged} 个没改动的文件跳过` : ""}${d.batches > 1 ? `（分 ${d.batches} 批）` : ""}。</p>
     <p style="margin:0 0 8px">${esc(d.overview)}</p>${warnBox(d)}`;
   if (allFixed) h += `<p style="color:var(--ok);font-weight:600">🎉 上次的问题都解决了，也没有发现新问题！</p>`;
   const card = i => {
