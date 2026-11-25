@@ -90,5 +90,14 @@ def save(path: str, content: str, encoding: str = "utf-8", crlf: bool = False) -
         data = text.encode(encoding)
     except UnicodeEncodeError:  # GBK 存不下的字符，改存 UTF-8
         data, encoding = text.encode("utf-8"), "utf-8"
-    Path(path).write_bytes(data)
+    # 先完整写进同一文件夹里的临时文件，再一次性替换原文件：写到一半出错时原文件不受影响
+    tmp = Path(path).with_name(f".{os.path.basename(path)}.{os.getpid()}.saving")
+    try:
+        tmp.write_bytes(data)
+        if backup:
+            shutil.copymode(backup, tmp)
+        os.replace(tmp, path)
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        raise ValueError(f"保存失败，原文件没有被改动（{e}）") from None
     return {"ok": True, "path": path, "encoding": encoding, "backup": str(backup) if backup else None}

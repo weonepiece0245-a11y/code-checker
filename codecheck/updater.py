@@ -37,11 +37,8 @@ def update_source() -> str:
 
 
 def local_version() -> str:
-    f = ROOT / "version.txt"
-    try:
-        return f.read_text(encoding="utf-8").strip() or "0"
-    except OSError:
-        return "0"
+    from . import read_version  # 每次都重新读文件：更新后不用重启也能拿到新版本号
+    return read_version()
 
 
 def remote_version(source: str) -> str:
@@ -151,6 +148,12 @@ def _install(staged: Path, files: dict) -> None:
     就把已经改动的文件全部恢复、新增的文件删掉，程序保持原来能用的样子。
     """
     old_manifest = _read_manifest()
+    if not old_manifest:
+        # 还没有安装清单（第一次用这个版本的更新器）：codecheck/ 是程序自己的文件夹，
+        # 里面新版本已经没有的 .py 文件就是被删掉的模块
+        pkg = ROOT / "codecheck"
+        old_manifest = {p.relative_to(ROOT).as_posix() for p in pkg.rglob("*.py")
+                        if "__pycache__" not in p.parts} if pkg.is_dir() else set()
     removed = sorted(old_manifest - set(files) - KEEP - {LAUNCHER, MANIFEST})
     backup_dir = Path(tempfile.mkdtemp(prefix="codecheck_rollback_"))
     changed: list[tuple[Path, Path | None]] = []  # (程序里的文件, 它的备份；None 表示原来没有这个文件)

@@ -150,13 +150,14 @@ def ruff_many(paths: list[str], include_syntax: bool = True) -> dict[str, list[I
         for item in items:
             key = norm.get(os.path.normcase(os.path.abspath(item["filename"])), item["filename"])
             if item.get("code") == "E902":  # 不是 UTF-8（多半是 GBK），换个编码再查
+                from . import textio
                 try:
-                    with open(key, "rb") as f:
-                        text = f.read().decode("gbk")
-                    result.setdefault(key, []).extend(ruff_text(text, key, include_syntax))
+                    ct = textio.read(key)
+                except OSError:
+                    ct = None
+                if ct is not None and ct.encoding != "utf-8":
+                    result.setdefault(key, []).extend(ruff_text(ct.text, key, include_syntax))
                     continue
-                except (OSError, UnicodeDecodeError):
-                    pass
             issue = _to_issue(item, include_syntax)
             if issue:
                 result.setdefault(key, []).append(issue)

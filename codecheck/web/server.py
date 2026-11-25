@@ -142,6 +142,7 @@ def update_apply():
 class GenTestsRequest(BaseModel):
     code: str = Field(max_length=200_000)
     language: Lang | None = None
+    source_path: str | None = None  # 打开的文件：按后缀确定语言，和检查时一致
     ai: AIBackend = "auto"
     explain_lang: ExplainLang = "简体中文"
 
@@ -149,7 +150,9 @@ class GenTestsRequest(BaseModel):
 @app.post("/api/tests/generate")
 def tests_generate(req: GenTestsRequest):
     try:
-        return testgen.generate(req.code, req.language or None, req.explain_lang, req.ai)
+        from ..languages import detect
+        language = req.language or detect(_real_file(req.source_path), req.code).key
+        return testgen.generate(req.code, language, req.explain_lang, req.ai)
     except Exception as e:
         return {"error": str(e)}
 
@@ -245,7 +248,7 @@ def fs_exclude(req: ExcludeRequest):
 @app.post("/api/fs/ai_plan")
 def fs_ai_plan(req: PathRequest):
     try:
-        p = folder_ai.plan(req.path, exclude=_exclude(req))
+        p = folder_ai.plan(req.path, exclude=_exclude(req), read=False)  # 只估算，不读文件
         last = folder_ai.last_review(req.path)
         return {"files": len(p["included"]), "chars": p["chars"], "skipped": p["skipped"],
                 "last_review": {"time": last["time"], "issues": len(last["issues"])} if last else None,

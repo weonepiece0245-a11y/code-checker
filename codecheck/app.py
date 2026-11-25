@@ -190,10 +190,10 @@ def _run_fallback(port: int):
 
 def spawn_and_wait(timeout: float = 60) -> tuple[str, str]:
     """在后台启动窗口，等它真正打开再返回。返回 ("ok" | "failed" | "slow", 日志最后几行)。"""
-    pyw = Path(sys.executable).with_name("pythonw.exe")
-    exe = str(pyw) if pyw.exists() else sys.executable
+    from .proc import DETACHED, windowless_python
+    exe = windowless_python()
     READY.unlink(missing_ok=True)
-    flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0  # DETACHED_PROCESS | NEW_GROUP
+    flags = DETACHED
     p = subprocess.Popen([exe, "-m", "codecheck.app"], cwd=ROOT, creationflags=flags,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=sys.platform != "win32")

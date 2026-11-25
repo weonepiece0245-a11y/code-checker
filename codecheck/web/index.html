@@ -631,6 +631,7 @@ async function genTests() {
   testsBusy("AI 正在读代码、设计测试，大约需要 10~40 秒…");
   try {
     const g = await post("/api/tests/generate", {code, language: $("lang").value || null,
+      source_path: curFile ? curFile.path : null,
       ai: $("ai").value === "none" ? "auto" : $("ai").value, explain_lang: $("explain").value});
     if (g.error) throw new Error(g.error);
     lastTests = g;

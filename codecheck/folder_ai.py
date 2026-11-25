@@ -3,7 +3,7 @@ import os
 
 from . import ai, folder, store, textio
 
-CHAR_BUDGET = 150_000  # 一次最多发送多少字符的代码（大约 5 万~8 万 token）
+CHAR_BUDGET = 180_000  # 一次最多发送多少字符的代码（大约 6 万~9 万 token）
 
 SCHEMA = {
     "type": "object",
@@ -64,28 +64,48 @@ def _file_block(f: dict, text: str) -> str:
     return f"===== 文件：{f['rel']} =====\n静态检查发现：\n{lint}\n代码：\n{numbered}"
 
 
-def plan(path: str, scan_result: dict | None = None, exclude: list[str] | None = None) -> dict:
+def _estimate(f: dict) -> int:
+    """不读文件，估算发送这个文件要多少字符：文件字节数（≥ 字符数）+ 每行的行号前缀 + 检查结果。"""
+    try:
+        size = os.path.getsize(f["path"])
+    except OSError:
+        return 0
+    lint = sum(len(i["message"]) + 30 for i in f["issues"]) or 4
+    return size + (f["lines"] + 1) * 7 + lint + len(f["rel"]) + 40
+
+
+def plan(path: str, scan_result: dict | None = None, exclude: list[str] | None = None,
+         read: bool = True) -> dict:
     """决定发送哪些文件：有错误的优先，然后是有警告的，再按文件从小到大，直到用完篇幅。
 
-    这一步就把文件内容读进来，后面直接用：审查要几分钟，期间文件被改名或删除也不会让审查失败。
-    篇幅按真正要发送的字符数算（包括行号和静态检查结果）。
+    先用文件大小估算（估算值不会小于实际值，不会超出篇幅），只读取真正要发送的文件。
+    read=False 时只做估算（给“开始前预览”用，很快）。
+    读进来的内容后面直接用：审查要几分钟，期间文件被改名或删除也不会让审查失败。
     """
     r = scan_result or folder.scan(path, exclude, compare=False)
-    included, skipped, unreadable, used = [], [], [], 0
+    included, skipped, unreadable = [], [], []
+    budget_used = chars = 0
     order = sorted(r["files"], key=lambda f: (-f["errors"], -f["warnings"], f["lines"]))
     for f in order:
+        est = _estimate(f)
+        # 选哪些文件只看估算值：这样“开始前预览”和真正审查选出的文件完全一样
+        if budget_used + est > CHAR_BUDGET:
+            skipped.append(f["rel"])
+            continue
+        budget_used += est
+        if not read:
+            included.append(f)
+            chars += est
+            continue
         try:
             block = _file_block(f, textio.read(f["path"]).text)
         except OSError:
             unreadable.append(f["rel"])
             continue
-        if used + len(block) > CHAR_BUDGET:
-            skipped.append(f["rel"])
-            continue
         included.append({**f, "block": block})
-        used += len(block)
+        chars += len(block)
     return {"scan": r, "included": included, "skipped": sorted(skipped), "unreadable": sorted(unreadable),
-            "chars": used}
+            "chars": chars}
 
 
 def _code_parts(p: dict) -> list[str]:

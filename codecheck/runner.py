@@ -48,13 +48,20 @@ MAX_FILE_BYTES = 10 * 1024 * 1024  # 被运行的代码最多写 10MB 的文件
 # “在原位置运行”的引导程序：代码内容来自临时文件（编辑器里的最新内容，可能还没保存），
 # 但让它以为自己就是原来那个文件——能 import 同目录的模块，__file__、报错里的路径和行号都对得上。
 _PY_BOOT = (
-    "import os,sys\n"
+    "import os,sys,types\n"
     "_t,_s=sys.argv[1],sys.argv[2]\n"
     "_c=open(_t,encoding='utf-8').read()\n"
-    "sys.path.insert(0,os.path.dirname(os.path.abspath(_s)))\n"
+    # sys.path[0] 原本是引导文件所在的临时文件夹，换成原文件所在的文件夹
+    "sys.path[0]=os.path.dirname(os.path.abspath(_s))\n"
     "sys.argv=[_s]\n"
-    "del os,_t\n"
-    "exec(compile(_c,_s,'exec'),{'__name__':'__main__','__file__':_s,'__builtins__':__builtins__})\n"
+    # 建一个真正的 __main__ 模块并放进 sys.modules：pickle、multiprocessing、dataclasses、
+    # typing.get_type_hints 等按 __main__ 找名字的功能才能正常工作，和直接运行一样
+    "_m=types.ModuleType('__main__')\n"
+    "_m.__file__=_s\n"
+    "_m.__builtins__=__builtins__\n"
+    "sys.modules['__main__']=_m\n"
+    "del os,types,_t\n"
+    "exec(compile(_c,_s,'exec'),_m.__dict__)\n"
 )
 _JS_BOOT = (
     "const Module=require('module'),fs=require('fs'),path=require('path');"
@@ -62,31 +69,41 @@ _JS_BOOT = (
     "const m=new Module(s,null);m.filename=s;m.id='.';m.paths=Module._nodeModulePaths(path.dirname(s));"
     "process.argv=[process.argv[0],s];process.mainModule=m;m._compile(c,s);"
 )
+BOOT_NAME = "_codecheck_run_.py"
 _ESM = re.compile(r"^\s*(import\s.+\sfrom\s|import\s+['\"]|export\s)", re.M)
 
 
 def _in_place_cmd(lang: Language, tmp_path: str, source_path: str, code: str) -> list[str] | None:
     """返回“在原位置运行”的命令；做不到（例如 ES 模块）时返回 None，退回普通方式。"""
     if lang.key == "python":
-        return [console_python(), "-c", _PY_BOOT, tmp_path, source_path]
+        # 引导程序写成单独的文件（不用 -c）：否则它和用户代码里 exec() 的字符串都叫 "<string>"，
+        # 报错时 Python 会把引导程序的代码行当成用户的显示出来
+        boot = os.path.join(os.path.dirname(tmp_path), BOOT_NAME)
+        with open(boot, "w", encoding="utf-8") as f:
+            f.write(_PY_BOOT)
+        return [console_python(), boot, tmp_path, source_path]
     if lang.key == "javascript" and not _ESM.search(code) and not source_path.lower().endswith(".mjs"):
         return ["node", "--max-old-space-size=256", "-e", _JS_BOOT, tmp_path, source_path]
     return None
 
 
 def _clean_boot_frames(text: str) -> str:
-    """去掉报错里属于引导程序的那一层（File "<string>"… 以及它下面的代码行和 ^^^ 标记），只留用户代码的。"""
-    out, skipping = [], False
-    for line in text.splitlines(keepends=True):
-        if re.match(r'\s*File "<string>", line \d+', line):
-            skipping = True
-            continue
-        if skipping:
-            # 这一层下面缩进更深的行（代码、~~~^^^ 标记）一起去掉，直到下一层 File 或错误信息
-            if line.startswith("    ") and not line.lstrip().startswith("File "):
-                continue
-            skipping = False
+    """去掉报错里属于引导程序的那一层，只留用户代码的。
+
+    引导程序那一层一定是紧跟在 “Traceback (most recent call last):” 后面的第一层（File ".../_codecheck_run_.py"）。
+    只删这一层；用户代码自己用 exec()/eval() 产生的 "<string>" 层要保留。
+    """
+    lines = text.splitlines(keepends=True)
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
         out.append(line)
+        i += 1
+        if line.rstrip().endswith("Traceback (most recent call last):") and i < len(lines) \
+                and re.match(r'\s*File ".*' + re.escape(BOOT_NAME) + r'", line \d+, in <module>', lines[i]):
+            i += 1  # 跳过这一层的标题，以及它下面缩进更深的代码行和 ~~~^^^ 标记
+            while i < len(lines) and lines[i].startswith("    ") and not lines[i].lstrip().startswith("File "):
+                i += 1
     return "".join(out)
 
 

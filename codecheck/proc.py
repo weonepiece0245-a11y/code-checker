@@ -9,6 +9,15 @@ from pathlib import Path
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
 
 
+DETACHED = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0  # DETACHED_PROCESS | NEW_PROCESS_GROUP
+
+
+def windowless_python() -> str:
+    """返回 pythonw.exe（没有黑色窗口）；没有的话就用当前的 Python。"""
+    p = Path(sys.executable).with_name("pythonw.exe")
+    return str(p) if p.exists() else sys.executable
+
+
 def console_python() -> str:
     """返回 python.exe（而不是 pythonw.exe），用来运行代码和工具，输入输出行为和命令行里一致。"""
     p = Path(sys.executable)

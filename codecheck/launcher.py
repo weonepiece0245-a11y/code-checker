@@ -10,17 +10,13 @@ import sys
 import threading
 from pathlib import Path
 
+from .proc import DETACHED, NO_WINDOW, windowless_python
+
 ROOT = Path(__file__).resolve().parent.parent
 BAT = ROOT / "启动网页版.bat"
 ICON = ROOT / "app.ico"
 IS_WIN = sys.platform == "win32"
-DETACHED = 0x00000008 | 0x00000200 if IS_WIN else 0  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-NO_WINDOW = 0x08000000 if IS_WIN else 0
-
-
-def pythonw() -> str:
-    p = Path(sys.executable).with_name("pythonw.exe")
-    return str(p) if p.exists() else sys.executable
+pythonw = windowless_python
 
 
 def spawn(module: str):
